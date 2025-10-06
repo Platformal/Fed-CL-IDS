@@ -1,3 +1,4 @@
+from sklearn.preprocessing import MinMaxScaler
 import pandas as pd
 import hashlib
 import yaml
@@ -42,7 +43,7 @@ def min_multiplier(traffic_data: dict, labels: dict) -> int:
 def create_days() -> None:
     RNG = 0
     df = pd.read_csv("datasets/UAVIDS-2025.csv", index_col=1)
-    with open("data_pipeline/splits/uavids_priors.yaml") as file:
+    with open("data_pipeline/splits/uavids_distribution.yaml") as file:
         days: dict[str, dict[str, float]]
         days = yaml.safe_load(file)
 
@@ -63,6 +64,25 @@ def create_days() -> None:
     with open("data_pipeline/splits/uavids_days.yaml", 'w') as file:
         yaml.dump(day_flows, file, default_flow_style=False)
 
+def preprocess():
+    labels = {
+        'Normal Traffic': 0, 
+        'Sybil Attack': 1, 
+        'Flooding Attack': 2,
+        'Wormhole Attack': 3, 
+        'Blackhole Attack': 4
+    }
+    initial_df = pd.read_csv("datasets/UAVIDS-2025.csv")
+    dropped = ['SrcAddr', 'DstAddr', 'Protocol']
+    main_df = initial_df.drop(dropped, axis=1).set_index('FlowID')
+    for column in main_df.columns[:-1]:
+        main_df[column] = MinMaxScaler().fit_transform(
+            main_df[column].to_numpy().reshape((-1, 1))
+        )
+    main_df['label'] = main_df['label'].map(labels)
+    main_df.to_csv("datasets/UAVIDS-2025 Preprocessed.csv")
+
 if __name__ == "__main__":
     # partition_to_client(20)
-    create_days()
+    # create_days()
+    preprocess()
