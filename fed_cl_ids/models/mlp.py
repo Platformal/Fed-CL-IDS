@@ -1,12 +1,16 @@
 """Fed-CL-IDS: A Flower / PyTorch app."""
 
 import torch
+from torch.optim.adam import Adam
+from torch.optim.lr_scheduler import CosineAnnealingLR
 import torch.nn as nn
+import pandas as pd
 import torch.nn.functional as F
 from flwr_datasets import FederatedDataset
 from flwr_datasets.partitioner import IidPartitioner
 from torch.utils.data import DataLoader
 from torchvision.transforms import Compose, Normalize, ToTensor
+from torch.utils.data import DataLoader, TensorDataset, random_split
 
 
 # class MLP(nn.Module):
@@ -28,6 +32,20 @@ from torchvision.transforms import Compose, Normalize, ToTensor
 #         x = F.relu(self.fc1(x))
 #         x = F.relu(self.fc2(x))
 #         return self.fc3(x)
+
+# Should return test and train sets
+def split_uavids(df: pd.DataFrame, flows: list[int]):
+    filtered = df.loc[flows]
+    features, labels = filtered.drop('label', axis=1), filtered['label']
+    features_tensor = torch.from_numpy(features.to_numpy())
+    labels_tensor = torch.from_numpy(labels.to_numpy())
+    dataset = TensorDataset(features_tensor, labels_tensor)
+
+    train_ratio, test_ratio = 0.8, 0.2
+    train_set, test_set = random_split(dataset, (train_ratio, test_ratio))
+    train = DataLoader(train_set, shuffle=True)
+    test = DataLoader(test_set, shuffle=True)
+    return train, test
 
 class MLP(nn.Module):
     # Values should be initialized by the server and passed onto clients
@@ -67,20 +85,39 @@ class MLP(nn.Module):
         return nn.Sequential(*layers)
 
     def forward(self, x) -> None:
-        self.network(x)
+        # self.network(x)
+        return self.network(x)
     
-    def get_optimizer(self, n_iterations: int) -> tuple:
-        optimizer = torch.optim.Adam(
+    def get_optimizer(self, n_iterations: int) -> tuple[Adam, CosineAnnealingLR]:
+        optimizer = Adam(
             self.parameters(),
             lr=self.lr_max,
             weight_decay=self.weight_decay
         )
-        scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
+        scheduler = CosineAnnealingLR(
             optimizer=optimizer,
             eta_min=self.lr_min,
             T_max=n_iterations
         )
         return optimizer, scheduler
+
+    # Make sure to pass local_epochs into this
+    # def client_train(self, df: pd.DataFrame, n_epochs: int):
+    #     train, _ = split_uavids(df)
+    #     optimizer, scheduler = self.get_optimizer(len(train) * 20)
+    #     loss_evaluator = nn.BCELoss()
+    #     for epoch in range(n_epochs):
+    #         self.train() # Train mode = True
+    #         total_loss = 0
+    #         # Load features and labels in batches
+    #         for features, labels in train:
+    #             optimizer.zero_grad()
+    #             outputs = self(features)
+    #             loss = loss_evaluator(outputs, labels)
+    #             loss.backward()
+    #             optimizer.step()
+    #         scheduler.step()
+    #         print(f"Epoch {epoch}: {loss.item()}")
 
 fds = None  # Cache FederatedDataset
 
