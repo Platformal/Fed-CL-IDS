@@ -35,7 +35,7 @@ clientapp = "fed_cl_ids.fed.client:app"
 # Example: flwr run --run-config num-server-rounds=10
 # Flower context.config can only process str, bool, float, int, str
 [tool.flwr.app.config]
-num-server-rounds = 3
+num-server-rounds = 10
 max-days = 1
 fraction-train = 1
 fraction-evaluate = 1
@@ -55,7 +55,7 @@ default = "local-simulation"
 # Local simulation federation with 10 virtual SuperNodes; number of clients.
 # Example: flwr run --federation-config options.num-supernodes=20
 [tool.flwr.federations.local-simulation]
-options.num-supernodes = 2
+options.num-supernodes = 10
 
 # Remote federation example for use with SuperLink
 [tool.flwr.federations.remote-federation]

@@ -62,11 +62,13 @@ def main(grid: Grid, context: Context) -> None:
 
     # Initialize FedAvg strategy
     strategy = UAVIDSFedAvg(fraction_train, fraction_eval, client_map)
+    flows = ConfigRecord({'flows': json.dumps(client_map)})
     result = strategy.start(
         grid,
         model_params,
         n_rounds,
-        train_config=ConfigRecord({'flows': json.dumps(client_map)})
+        train_config=flows,
+        evaluate_config=flows
     )
 
     # Start strategy, run FedAvg for num_rounds
@@ -76,7 +78,7 @@ def main(grid: Grid, context: Context) -> None:
     #     train_config=ConfigRecord({"lr": learning_rate}),
     #     num_rounds=n_rounds,
     # )
-    # # Save final model to disk
-    # print("\nSaving final model as final_model.pt")
-    # state_dict = result.arrays.to_torch_state_dict()
-    # torch.save(state_dict, "final_model.pt")
+    # Save final model to disk
+    print("\nSaving final model as final_model.pt")
+    state_dict = result.arrays.to_torch_state_dict()
+    torch.save(state_dict, "final_model.pt")
