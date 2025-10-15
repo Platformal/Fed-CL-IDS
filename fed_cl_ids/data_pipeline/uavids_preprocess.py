@@ -1,4 +1,4 @@
-from sklearn.preprocessing import StandardScaler
+from sklearn.preprocessing import RobustScaler
 import pandas as pd
 import hashlib
 import yaml
@@ -72,18 +72,18 @@ def preprocess():
         'Wormhole Attack': 1, 
         'Blackhole Attack': 1
     }
-    initial_df = pd.read_csv("datasets/UAVIDS-2025.csv")
+    initial_df = pd.read_csv("fed_cl_ids/datasets/UAVIDS-2025.csv")
     dropped = ['SrcAddr', 'DstAddr', 'Protocol']
     main_df = initial_df.drop(dropped, axis=1).set_index('FlowID')
     for column in main_df.columns[:-1]:
-        main_df[column] = StandardScaler().fit_transform(
+        main_df[column] = RobustScaler().fit_transform(
             main_df[column].to_numpy().reshape((-1, 1))
         )
     main_df['label'] = main_df['label'].map(labels)
-    main_df.to_csv("datasets/UAVIDS-2025 Preprocessed.csv")
+    main_df.to_csv("fed_cl_ids/datasets/UAVIDS-2025 Preprocessed.csv")
 
 if __name__ == "__main__":
     # generate_clients(20)
     # generate_days()
-    # preprocess()
+    preprocess()
     pass
