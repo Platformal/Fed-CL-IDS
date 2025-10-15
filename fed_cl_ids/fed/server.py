@@ -61,7 +61,7 @@ def main(grid: Grid, context: Context) -> None:
         client_map[i].append(flow_id)  
 
     # Initialize FedAvg strategy
-    strategy = UAVIDSFedAvg(fraction_train, fraction_eval, client_map)
+    strategy = UAVIDSFedAvg(fraction_train, fraction_eval)
     flows = ConfigRecord({'flows': json.dumps(client_map)})
     result = strategy.start(
         grid,
