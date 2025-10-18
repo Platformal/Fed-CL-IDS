@@ -1,12 +1,8 @@
-"""Fed-CL-IDS: A Flower / PyTorch app."""
-
 import torch
 import pandas as pd
 from flwr.app import ArrayRecord, Context, Message, MetricRecord, RecordDict
 from flwr.clientapp import ClientApp
-from fed_cl_ids.models.mlp import MLP, load_data, split_uavids
-from fed_cl_ids.models.mlp import test as test_fn
-from fed_cl_ids.models.mlp import train as train_fn
+from fed_cl_ids.models.mlp import MLP, split_uavids
 from fed_cl_ids.models.mlp import client_train, client_test
 
 # Flower ClientApp
@@ -14,9 +10,8 @@ app = ClientApp()
 
 dataset: pd.DataFrame | None = None
 
-# Needs flows for specific client for specific day
-# Client needs ID to receive correct flows
-# Client will load and store the dataset globally
+# Client MLP model needs to receive initial parameters to construct model.
+# Loading state from server model raise error due to incorrect model_widths
 @app.train()
 def train(msg: Message, context: Context) -> Message:
     model_width = context.run_config['mlp-width']

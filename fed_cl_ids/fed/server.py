@@ -3,7 +3,6 @@
 import torch
 from flwr.app import ArrayRecord, ConfigRecord, Context
 from flwr.serverapp import Grid, ServerApp
-from flwr.serverapp.strategy import FedAvg
 from fed_cl_ids.fed.CustomStrategies import UAVIDSFedAvg
 from fed_cl_ids.models.mlp import MLP
 from fed_cl_ids.data_pipeline.uavids_preprocess import generate_clients
@@ -54,7 +53,7 @@ def main(grid: Grid, context: Context) -> None:
     days = yaml.safe_load(open("fed_cl_ids/data_pipeline/splits/uavids_days.yaml"))
     days = dict(list(days.items())[:max_days])
     
-    # Hash flow_id to client
+    # Hash FlowIDs to client
     client_map = [[] for _ in range(n_train_clients)]
     for flow_id in days['Day1']:
         i = hash(flow_id) % n_train_clients
@@ -71,13 +70,6 @@ def main(grid: Grid, context: Context) -> None:
         evaluate_config=flows
     )
 
-    # Start strategy, run FedAvg for num_rounds
-    # result = strategy.start(
-    #     grid=grid,
-    #     initial_arrays=model_params,
-    #     train_config=ConfigRecord({"lr": learning_rate}),
-    #     num_rounds=n_rounds,
-    # )
     # Save final model to disk
     print("\nSaving final model as final_model.pt")
     state_dict = result.arrays.to_torch_state_dict()

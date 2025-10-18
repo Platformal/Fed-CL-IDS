@@ -35,7 +35,7 @@ clientapp = "fed_cl_ids.fed.client:app"
 # Example: flwr run --run-config num-server-rounds=10
 # Flower context.config can only process str, bool, float, int, str
 [tool.flwr.app.config]
-num-server-rounds = 10
+num-server-rounds = 80
 max-days = 1
 fraction-train = 1
 fraction-evaluate = 1
@@ -43,7 +43,6 @@ local-epochs = 1
 mlp-width = "256,256,128,64"
 mlp-dropout = 0.2
 mlp-weight-decay = 1e-4
-# Days
 lr-max = 1e-3
 lr-min = 1e-4
 

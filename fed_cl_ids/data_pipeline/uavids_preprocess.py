@@ -15,9 +15,12 @@ def generate_clients(n_clients: int) -> None:
     df = pd.read_csv("fed_cl_ids/datasets/UAVIDS-2025.csv")
     df['client_id'] = df.apply(deterministic_hash, axis=1, args=(n_clients,))
     client_dict = df.groupby("client_id").groups
-    client_map = {}
-    for client, index in client_dict.items():
-        client_map[client] = df.loc[index, 'FlowID'].tolist()
+    client_map = {
+        client: df.loc[index, 'FlowID'].tolist()
+        for client, index in client_dict.items()
+    }
+    # for client, index in client_dict.items():
+    #     client_map[client] = df.loc[index, 'FlowID'].tolist()
     with open("fed_cl_ids/data_pipeline/splits/clients.yaml", 'w') as file:
         yaml.dump(client_map, file, default_flow_style=False)
 
@@ -30,13 +33,13 @@ simulating concept drift without generating new traffic.
 Choose which flows are active per day.
 '''
 
-# To maintain proportion with highest sample size
+# To maintain proportion with the highest sample size
 def min_multiplier(traffic_data: dict, labels: dict) -> int:
     multipliers = []
     for traffic_type, fraction in traffic_data.items():
         if not fraction:
             continue
-        multiplier = len(labels[traffic_type]) // (fraction * 100)
+        multiplier: int = len(labels[traffic_type]) // (fraction * 100)
         multipliers.append(multiplier)
     return min(multipliers)
 

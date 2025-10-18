@@ -70,9 +70,13 @@ class UAVIDSFedAvg(FedAvg):
         for i, message in enumerate(messages):
             client_content = message.content.copy()
             client_content['config'] = client_content['config'].copy()
-            client_content['config']['flows'] = flows[i]
+            # If N train clients < N evaluate clients
+            client_content['config']['flows'] = flows[i % len(flows)]
             message.content = client_content
         return messages
+    
+    def add_flows_to_config(self):
+        pass
     
     def start(
         self,
