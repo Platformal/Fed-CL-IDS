@@ -82,13 +82,13 @@ class UAVIDSFedAvg(FedAvg):
         self,
         grid: Grid,
         initial_arrays: ArrayRecord,
-        num_rounds: int = 3,
+        current_day: int,
+        num_rounds: int,
         timeout: float = 3600,
         train_config: Optional[ConfigRecord] = None,
         evaluate_config: Optional[ConfigRecord] = None,
         evaluate_fn: Optional[
-            Callable[[int, ArrayRecord], Optional[MetricRecord]]
-        ] = None,
+            Callable[[int, ArrayRecord], Optional[MetricRecord]]] = None,
     ) -> Result:
         """Execute the federated learning strategy.
 
@@ -144,12 +144,11 @@ class UAVIDSFedAvg(FedAvg):
             if res is not None:
                 result.evaluate_metrics_serverapp[0] = res
 
-        arrays = initial_arrays
-
+        current_array = initial_arrays
         for current_round in range(1, num_rounds + 1):
             log(INFO, "")
-            log(INFO, "[ROUND %s/%s]", current_round, num_rounds)
-
+            log(INFO, "[Day %s | ROUND %s/%s]", current_day, current_round, num_rounds)
+            
             # -----------------------------------------------------------------
             # --- TRAINING (CLIENTAPP-SIDE) -----------------------------------
             # -----------------------------------------------------------------
@@ -159,7 +158,7 @@ class UAVIDSFedAvg(FedAvg):
             train_replies = grid.send_and_receive(
                 messages=self.configure_train(
                     current_round,
-                    arrays,
+                    current_array,
                     train_config,
                     grid,
                 ),
@@ -175,7 +174,7 @@ class UAVIDSFedAvg(FedAvg):
             # Log training metrics and append to history
             if agg_arrays is not None:
                 result.arrays = agg_arrays
-                arrays = agg_arrays
+                current_array = agg_arrays
             if agg_train_metrics is not None:
                 log(INFO, "\t└──> Aggregated MetricRecord: %s", agg_train_metrics)
                 result.train_metrics_clientapp[current_round] = agg_train_metrics
@@ -189,7 +188,7 @@ class UAVIDSFedAvg(FedAvg):
             evaluate_replies = grid.send_and_receive(
                 messages=self.configure_evaluate(
                     current_round,
-                    arrays,
+                    current_array,
                     evaluate_config,
                     grid,
                 ),
@@ -207,17 +206,17 @@ class UAVIDSFedAvg(FedAvg):
                 log(INFO, "\t└──> Aggregated MetricRecord: %s", agg_evaluate_metrics)
                 result.evaluate_metrics_clientapp[current_round] = agg_evaluate_metrics
 
-            # -----------------------------------------------------------------
-            # --- EVALUATION (SERVERAPP-SIDE) ---------------------------------
-            # -----------------------------------------------------------------
+        # -----------------------------------------------------------------
+        # --- EVALUATION (SERVERAPP-SIDE) ---------------------------------
+        # -----------------------------------------------------------------
 
-            # Centralized evaluation
-            if evaluate_fn:
-                log(INFO, "Global evaluation")
-                res = evaluate_fn(current_round, arrays)
-                log(INFO, "\t└──> MetricRecord: %s", res)
-                if res is not None:
-                    result.evaluate_metrics_serverapp[current_round] = res
+        # Centralized evaluation
+        if evaluate_fn:
+            log(INFO, "Global evaluation")
+            res = evaluate_fn(current_round, current_array)
+            log(INFO, "\t└──> MetricRecord: %s", res)
+            if res is not None:
+                result.evaluate_metrics_serverapp[current_round] = res
 
         log(INFO, "")
         log(INFO, "Strategy execution finished in %.2fs", time.time() - t_start)

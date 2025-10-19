@@ -14,8 +14,8 @@ description = ""
 license = "Apache-2.0"
 # Dependencies for your Flower App
 dependencies = [
-    "flwr[simulation]>=1.22.0",
-    "flwr-datasets[vision]>=0.5.0",
+    "flwr[simulation]>=1.22.0", # Not needed
+    "flwr-datasets[vision]>=0.5.0", # Not needed
     "torch==2.7.1",
     "torchvision==0.22.1",
 ]
@@ -32,17 +32,20 @@ serverapp = "fed_cl_ids.fed.server:app"
 clientapp = "fed_cl_ids.fed.client:app"
 
 # Custom config values accessible via `context.run_config`
-# Example: flwr run --run-config num-server-rounds=10
+# Example: flwr run -c 'max-days=2 n-rounds=3'
 # Flower context.config can only process str, bool, float, int, str
 [tool.flwr.app.config]
-num-server-rounds = 80
-max-days = 1
+n-rounds = 80
+max-days = 4
 fraction-train = 1
 fraction-evaluate = 1
 local-epochs = 1
+n-features = 18
+n-classes = 2
 mlp-width = "256,256,128,64"
 mlp-dropout = 0.2
 mlp-weight-decay = 1e-4
+batch-size = 128
 lr-max = 1e-3
 lr-min = 1e-4
 

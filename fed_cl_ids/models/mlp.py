@@ -6,7 +6,7 @@ import torch.nn as nn
 import pandas as pd
 
 # Should return test and train sets
-def split_uavids(df: pd.DataFrame, flows: list[int]):
+def split_uavids(df: pd.DataFrame, flows: list[int], n_batches: int):
     filtered = df.loc[flows]
     features, labels = filtered.drop('label', axis=1), filtered['label']
     features_tensor = torch.from_numpy(features.to_numpy())
@@ -16,8 +16,8 @@ def split_uavids(df: pd.DataFrame, flows: list[int]):
     train_ratio, test_ratio = 0.8, 0.2
     train_set, test_set = random_split(dataset, (train_ratio, test_ratio),
                                        torch.Generator().manual_seed(0))
-    train = DataLoader(train_set, batch_size=64, shuffle=True)
-    test = DataLoader(test_set, batch_size=64, shuffle=True)
+    train = DataLoader(train_set, batch_size=n_batches, shuffle=True)
+    test = DataLoader(test_set, batch_size=n_batches, shuffle=True)
     return train, test
 
 class MLP(nn.Module):
