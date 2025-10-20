@@ -8,7 +8,7 @@ import time
 import io
 import json
 
-def new_str_config(config: ConfigRecord) -> str:
+def str_config(config: ConfigRecord) -> str:
     """Ensures start log does not print all elements in flows."""
     all_config_str: list[str] = []
     for key, value in config.items():
@@ -42,12 +42,12 @@ def log_strategy_start_info(
     log(
         INFO,
         "\t├── ConfigRecord (train): %s",
-        new_str_config(train_config) if train_config else "(empty!)",
+        str_config(train_config) if train_config else "(empty!)",
     )
     log(
         INFO,
         "\t├── ConfigRecord (evaluate): %s",
-        new_str_config(evaluate_config) if evaluate_config else "(empty!)",
+        str_config(evaluate_config) if evaluate_config else "(empty!)",
     )
 
 class UAVIDSFedAvg(FedAvg):

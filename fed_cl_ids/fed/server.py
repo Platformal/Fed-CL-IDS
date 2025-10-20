@@ -1,10 +1,8 @@
-"""Fed-CL-IDS: A Flower / PyTorch app."""
-
-import torch
 from flwr.app import ArrayRecord, ConfigRecord, Context
 from flwr.serverapp import Grid, ServerApp
 from fed_cl_ids.fed.CustomStrategies import UAVIDSFedAvg
 from fed_cl_ids.models.mlp import MLP
+import torch
 import hashlib
 import json
 import yaml
@@ -12,21 +10,20 @@ import yaml
 # Create ServerApp
 app = ServerApp()
 
-
 @app.main()
 def main(grid: Grid, context: Context) -> None:
     # Get configurations
-    fraction_train: float = context.run_config['fraction-train']
-    fraction_eval: float = context.run_config['fraction-evaluate']
-    n_rounds: int = context.run_config['n-rounds']
-    max_days: int = context.run_config['max-days']
-    n_features: int = context.run_config['n-features']
-    n_classes: int = context.run_config['n-classes']
-    model_width: str = context.run_config['mlp-width']
-    model_dropout: float = context.run_config['mlp-dropout']
-    model_weight_decay: float = context.run_config['mlp-weight-decay']
-    lr_max: float = context.run_config['lr-max']
-    lr_min: float = context.run_config['lr-min']
+    fraction_train = float(context.run_config['fraction-train'])
+    fraction_eval = float(context.run_config['fraction-evaluate'])
+    n_rounds = int(context.run_config['n-rounds'])
+    max_days = int(context.run_config['max-days'])
+    n_features = int(context.run_config['n-features'])
+    n_classes = int(context.run_config['n-classes'])
+    model_width = str(context.run_config['mlp-width'])
+    model_dropout = float(context.run_config['mlp-dropout'])
+    model_weight_decay = float(context.run_config['mlp-weight-decay'])
+    lr_max = float(context.run_config['lr-max'])
+    lr_min = float(context.run_config['lr-min'])
 
     # Create and initialize central model to none.
     central_model = MLP(
@@ -53,11 +50,12 @@ def main(grid: Grid, context: Context) -> None:
     initial_model = ArrayRecord(central_model.state_dict())
     current_model: ArrayRecord = initial_model
     for day in range(1, max_days + 1):
+        # Assign each flow to available clients for given day
         client_map = [[] for _ in range(n_train_clients)]
         for flow_id in uavids_days[f"Day{day}"]:
-            string_encoding = str(flow_id).encode()
-            hash_str = hashlib.sha256(string_encoding).hexdigest()
-            i = int(hash_str, 16) % n_train_clients
+            id_encoding = str(flow_id).encode()
+            id_hash = hashlib.sha256(id_encoding).hexdigest()
+            i = int(id_hash, 16) % n_train_clients
             client_map[i].append(flow_id)
         
         flows = ConfigRecord({'flows': json.dumps(client_map)})
