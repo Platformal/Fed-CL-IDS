@@ -185,7 +185,7 @@ class UAVIDSFedAvg(FedAvg):
 
             # Call strategy to configure evaluation round
             # Send messages and wait for replies
-            evaluate_replies = grid.send_and_receive(
+            evaluate_replies: Iterable[Message] = grid.send_and_receive(
                 messages=self.configure_evaluate(
                     current_round,
                     current_array,

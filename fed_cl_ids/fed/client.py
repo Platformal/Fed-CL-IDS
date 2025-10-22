@@ -1,10 +1,13 @@
+from fed_cl_ids.models.losses import roc_auc, pr_auc, macro_f1, recall_per_1fpr
 from flwr.app import ArrayRecord, Context, Message, MetricRecord, RecordDict
 from flwr.clientapp import ClientApp
 from fed_cl_ids.models.mlp import MLP
 from torch.utils.data import DataLoader, TensorDataset, random_split
+from torch.nn import CrossEntropyLoss
+from torch import Tensor
 import torch
-import torch.nn as nn
 import pandas as pd
+import numpy as np
 
 # Flower ClientApp
 app = ClientApp()
@@ -54,8 +57,10 @@ def train(msg: Message, context: Context) -> Message:
     })
     return Message(content=content, reply_to=msg)
 
-def client_train(model: MLP, train_data: DataLoader, n_epochs: int, device: torch.device) -> float:
-    criterion = nn.CrossEntropyLoss().to(device)
+def client_train(
+        model: MLP, train_data: DataLoader, 
+        n_epochs: int, device: torch.device) -> float:
+    criterion = CrossEntropyLoss().to(device)
     optimizer, scheduler = model.get_optimizer(len(train_data) * 20)
     model.train()
     running_loss = 0.0
@@ -88,38 +93,54 @@ def evaluate(msg: Message, context: Context) -> Message:
     batch_size = int(context.run_config['batch-size'])
     _, test = split_uavids(dataset, flow_ids, batch_size)
 
-    eval_loss, eval_acc = client_test(model, test, device)
-    metrics = {
-        "eval_loss": eval_loss,
-        "eval_acc": eval_acc,
-        "num-examples": len(test),
-    }
+    metrics = client_evaluate(model, test, device)
+    metrics['num-examples'] = len(test)
     metric_record = MetricRecord(metrics)
-    content = RecordDict({"metrics": metric_record})
+    content = RecordDict({'metrics': metric_record})
     return Message(content=content, reply_to=msg)
 
-def client_test(model: MLP, test_data: DataLoader, device: torch.device) -> tuple[float, float]:
+def client_evaluate(model: MLP, test_data: DataLoader, 
+                    device: torch.device) -> dict[str, float]:
     model.to(device)
-    loss_evaluator = nn.CrossEntropyLoss().to(device)
-    correct, total_loss = 0, 0.0
-    total_samples = 0
+    loss_evaluator = CrossEntropyLoss().to(device)
+    correct = total_samples = 0
+    total_loss = 0.0
+    all_predictions, all_probabilities, all_labels = [], [], []
     # Doesn't need gradient descent for evaluation
     with torch.no_grad():
         for batch in test_data:
             features, labels = batch
-            features = features.to(device).to(torch.float32)
-            labels = labels.to(device).to(torch.long)
-            outputs = model(features)
+            features: Tensor = features.to(device).to(torch.float32)
+            labels: Tensor = labels.to(device).to(torch.long)
+            outputs: Tensor = model(features)
+            predictions = torch.argmax(outputs, dim=1)
+            # Outputs probability for each class. Take positive probability
+            probabilities = torch.softmax(outputs, dim=1)[:,1]
+            
+            correct += (predictions == labels).sum().item()
             total_loss += loss_evaluator(outputs, labels).item()
-            preds = torch.argmax(outputs, dim=1)
-            correct += (preds == labels).sum().item()
             total_samples += labels.size(0)
-    # Compute averages
-    accuracy = correct / total_samples if total_samples > 0 else 0.0
-    avg_loss = total_loss / len(test_data)
-    return avg_loss, accuracy
 
-# Should return test and train sets
+            all_predictions.extend(predictions.cpu().numpy())
+            all_probabilities.extend(probabilities.cpu().numpy())
+            all_labels.extend(labels.cpu().numpy())
+    accuracy = correct / total_samples if total_samples > 0 else 0.0
+    loss = total_loss / len(test_data)
+    
+    all_predictions = np.array(all_predictions)
+    all_probabilities = np.array(all_predictions)
+    all_labels = np.array(all_labels)
+
+    metrics = {
+        'loss': loss,
+        'accuracy': accuracy,
+        'roc-auc': roc_auc(all_labels, all_predictions),
+        'pr-auc': pr_auc(all_labels, all_predictions),
+        'macro-f1': macro_f1(all_labels, all_predictions),
+        'recall@fpr=1%': recall_per_1fpr(all_labels, all_probabilities)
+    }
+    return metrics
+
 def split_uavids(df: pd.DataFrame, flows: list[int], n_batches: int):
     filtered = df.loc[flows]
     features, labels = filtered.drop('label', axis=1), filtered['label']
