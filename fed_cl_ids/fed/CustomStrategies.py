@@ -51,7 +51,7 @@ def log_strategy_start_info(
     )
 
 class UAVIDSFedAvg(FedAvg):
-    def __init__(self, fraction_train, fraction_eval):
+    def __init__(self, fraction_train, fraction_eval) -> None:
         super().__init__(fraction_train, fraction_eval)
     
     def configure_train(self, server_round: int, arrays: ArrayRecord, config: ConfigRecord, grid: Grid) -> Iterable[Message]:
@@ -64,7 +64,8 @@ class UAVIDSFedAvg(FedAvg):
             message.content = client_content
         return messages
     
-    def configure_evaluate(self, server_round: int, arrays: ArrayRecord, config: ConfigRecord, grid: Grid) -> Iterable[Message]:
+    def configure_evaluate(self, server_round: int, arrays: ArrayRecord, 
+                           config: ConfigRecord, grid: Grid) -> Iterable[Message]:
         messages = super().configure_evaluate(server_round, arrays, config, grid)
         flows: list[list[int]] = json.loads(config['flows'])
         for i, message in enumerate(messages):

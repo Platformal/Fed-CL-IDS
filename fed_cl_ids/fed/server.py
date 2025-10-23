@@ -35,7 +35,7 @@ def main(grid: Grid, context: Context) -> None:
         lr_max=lr_max,
         lr_min=lr_min
     )
-    device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
+    device = torch.device('cuda:0' if torch.cuda.is_available() else 'cpu')
     central_model.to(device)
 
     n_train_clients = int(len(list(grid.get_node_ids())) * fraction_train)

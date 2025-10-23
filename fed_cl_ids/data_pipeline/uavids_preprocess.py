@@ -45,10 +45,9 @@ def min_multiplier(traffic_data: dict, labels: dict) -> int:
 
 def generate_days() -> None:
     RNG = 0
-    df = pd.read_csv("datasets/UAVIDS-2025.csv", index_col=1)
-    with open("data_pipeline/splits/uavids_distribution.yaml") as file:
-        days: dict[str, dict[str, float]]
-        days = yaml.safe_load(file)
+    df = pd.read_csv("fed_cl_ids/datasets/UAVIDS-2025.csv", index_col=1)
+    with open("fed_cl_ids/data_pipeline/splits/uavids_distribution.yaml") as file:
+        days: dict[str, dict[str, float]] = yaml.safe_load(file)
 
     labels = {label: subframe for label, subframe in df.groupby('label')}
     day_flows = {}
@@ -64,7 +63,7 @@ def generate_days() -> None:
                     .sample(frac=1, random_state=RNG)
                     .tolist())
         day_flows[day] = flow_data
-    with open("data_pipeline/splits/uavids_days.yaml", 'w') as file:
+    with open("fed_cl_ids/data_pipeline/splits/uavids_days.yaml", 'w') as file:
         yaml.dump(day_flows, file, default_flow_style=False)
 
 def preprocess():
@@ -87,6 +86,6 @@ def preprocess():
 
 if __name__ == "__main__":
     # generate_clients(20)
-    # generate_days()
-    preprocess()
+    generate_days()
+    # preprocess()
     pass

@@ -1,4 +1,4 @@
-from fed_cl_ids.models.losses import roc_auc, pr_auc, macro_f1, recall_per_1fpr
+from fed_cl_ids.models.losses import roc_auc, pr_auc, macro_f1, recall_at_fpr
 from flwr.app import ArrayRecord, Context, Message, MetricRecord, RecordDict
 from flwr.clientapp import ClientApp
 from fed_cl_ids.models.mlp import MLP
@@ -33,7 +33,7 @@ def load_server_model(msg: Message, context: Context, device: torch.device) -> M
 # Client MLP model needs to receive initial parameters to construct model.
 @app.train()
 def train(msg: Message, context: Context) -> Message:
-    device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
+    device = torch.device('cuda:0' if torch.cuda.is_available() else 'cpu')
     model = load_server_model(msg, context, device)
     
     flow_ids: list[int] = msg.content['config']['flows']
@@ -71,9 +71,11 @@ def client_train(
             features = features.to(device).to(torch.float32)
             labels = labels.to(device).to(torch.long)
             optimizer.zero_grad() # Resets the gradient
+
             outputs = model(features) # Forward pass
             loss = criterion(outputs, labels)
-            loss.backward() # Backpropagation & computes gradient
+            loss.backward() # Computes mini-batch SGD
+
             optimizer.step() # Update weights using gradient descent
             scheduler.step() # Adjust learning rate
             running_loss += loss.item()
@@ -124,23 +126,22 @@ def client_evaluate(model: MLP, test_data: DataLoader,
             all_predictions.extend(predictions.cpu().numpy())
             all_probabilities.extend(probabilities.cpu().numpy())
             all_labels.extend(labels.cpu().numpy())
-    accuracy = correct / total_samples if total_samples > 0 else 0.0
-    loss = total_loss / len(test_data)
     
     all_predictions = np.array(all_predictions)
-    all_probabilities = np.array(all_predictions)
+    all_probabilities = np.array(all_probabilities)
     all_labels = np.array(all_labels)
 
     metrics = {
-        'loss': loss,
-        'accuracy': accuracy,
+        'accuracy': correct / total_samples if total_samples > 0 else 0.0,
+        'loss': total_loss / len(test_data),
         'roc-auc': roc_auc(all_labels, all_predictions),
         'pr-auc': pr_auc(all_labels, all_predictions),
         'macro-f1': macro_f1(all_labels, all_predictions),
-        'recall@fpr=1%': recall_per_1fpr(all_labels, all_probabilities)
+        'recall@fpr=1%': recall_at_fpr(all_labels, all_probabilities, 0.01)
     }
     return metrics
 
+# Get flow data from dataframe, split data into train and test
 def split_uavids(df: pd.DataFrame, flows: list[int], n_batches: int):
     filtered = df.loc[flows]
     features, labels = filtered.drop('label', axis=1), filtered['label']
