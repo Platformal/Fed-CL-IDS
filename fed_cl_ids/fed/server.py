@@ -44,7 +44,8 @@ def main(grid: Grid, context: Context) -> None:
     uavids_days = yaml.safe_load(open("fed_cl_ids/data_pipeline/splits/uavids_days.yaml"))
     uavids_days = dict(list(uavids_days.items())[:max_days])
     
-    # Initialize FedAvg strategy
+    # Sampled clients are static and won't change throughout days.
+    # Strategy needs to be in loop. Reassigns sampled clients if need be.
     strategy = UAVIDSFedAvg(fraction_train, fraction_eval)
 
     initial_model = ArrayRecord(central_model.state_dict())

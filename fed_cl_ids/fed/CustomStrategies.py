@@ -76,9 +76,6 @@ class UAVIDSFedAvg(FedAvg):
             message.content = client_content
         return messages
     
-    def add_flows_to_config(self):
-        pass
-    
     def start(
         self,
         grid: Grid,

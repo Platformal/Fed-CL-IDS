@@ -6,6 +6,7 @@ from torch.utils.data import DataLoader, TensorDataset, random_split
 from torch.nn import CrossEntropyLoss
 from torch import Tensor
 import torch
+import random
 import pandas as pd
 import numpy as np
 
@@ -13,6 +14,9 @@ import numpy as np
 app = ClientApp()
 
 dataset: pd.DataFrame | None = None
+# Size = 0.5% to 1% of all seen flows
+replay_buffer: list[tuple[Tensor, int]] = []
+total_flows = 0
 
 # Server sends message of array dict, initialize and load model parameters.
 def load_server_model(msg: Message, context: Context, device: torch.device) -> MLP:
@@ -30,21 +34,44 @@ def load_server_model(msg: Message, context: Context, device: torch.device) -> M
     model.load_state_dict(model_params)
     return model.to(device)
 
+def load_pd_csv(file_path) -> pd.DataFrame:
+    global dataset
+    if dataset is None:
+        dataset = pd.read_csv(file_path).set_index('FlowID')
+    return dataset
+
+def update_replay_buffer(train_data: DataLoader, replay_ratio: float) -> None:
+    """Randomly add samples to replay buffer, maintaining max size."""
+    # Total flows should be updated before training
+    global replay_buffer
+    new_samples = []
+    for features, labels in train_data:
+        for f, l in zip(features, labels):
+            new_samples.append((f.cpu(), l.item()))
+    replay_buffer.extend(new_samples)
+
+    max_buffer_size = int(replay_ratio * total_flows)
+    if len(replay_buffer) > max_buffer_size:
+        replay_buffer = replay_buffer[-max_buffer_size:]
+    print(total_flows, len(replay_buffer))
+
 # Client MLP model needs to receive initial parameters to construct model.
 @app.train()
 def train(msg: Message, context: Context) -> Message:
     device = torch.device('cuda:0' if torch.cuda.is_available() else 'cpu')
     model = load_server_model(msg, context, device)
-    
+    replay_ratio = float(context.run_config['replay-ratio'])    
     flow_ids: list[int] = msg.content['config']['flows']
+
+    global total_flows
+    total_flows += len(flow_ids)
+
     uavids_path = "fed_cl_ids/datasets/UAVIDS-2025 Preprocessed.csv"
-    global dataset
-    if dataset is None:
-        dataset = pd.read_csv(uavids_path).set_index('FlowID')
+    data = load_pd_csv(uavids_path)
     batch_size = int(context.run_config['batch-size'])
-    train, _ = split_uavids(dataset, flow_ids, batch_size)
+    train_data, _ = split_uavids(data, flow_ids, batch_size)
     epochs = int(context.run_config['local-epochs'])
-    avg_loss = client_train(model, train, epochs, device)
+    avg_loss = client_train(model, train_data, epochs, replay_ratio, device)
     client_model_params = ArrayRecord(model.state_dict())
     metrics = {
         'train_loss': avg_loss,
@@ -59,18 +86,31 @@ def train(msg: Message, context: Context) -> Message:
 
 def client_train(
         model: MLP, train_data: DataLoader, 
-        n_epochs: int, device: torch.device) -> float:
+        n_epochs: int, replay_ratio: float, device: torch.device) -> float:
     criterion = CrossEntropyLoss().to(device)
     optimizer, scheduler = model.get_optimizer(len(train_data) * 20)
     model.train()
     running_loss = 0.0
+
+    
+
     for _ in range(n_epochs):
         for batch in train_data:
             features, labels = batch
+
+            replay_size = int(replay_ratio * len(features))
+            if replay_size and len(replay_buffer) >= replay_size:
+                samples = random.sample(
+                    replay_buffer, min(replay_size, len(replay_buffer)))
+                old_features = torch.stack([feature for feature, _ in samples])
+                old_labels = torch.tensor([label for _, label in samples])
+                features = torch.cat((features, old_features))
+                labels = torch.cat((labels, old_labels))
+            
             # Move inputs/labels to the correct device and dtypes
             features = features.to(device).to(torch.float32)
-            labels = labels.to(device).to(torch.long)
-            optimizer.zero_grad() # Resets the gradient
+            labels = labels.to(device)#.to(torch.long)
+            optimizer.zero_grad() # Reset gradient
 
             outputs = model(features) # Forward pass
             loss = criterion(outputs, labels)
@@ -79,6 +119,9 @@ def client_train(
             optimizer.step() # Update weights using gradient descent
             scheduler.step() # Adjust learning rate
             running_loss += loss.item()
+
+    update_replay_buffer(train_data, replay_ratio)
+            
     avg_trainloss = running_loss / len(train_data)
     return avg_trainloss
 
@@ -89,11 +132,9 @@ def evaluate(msg: Message, context: Context) -> Message:
 
     flow_ids: list[int] = msg.content['config']['flows']
     uavids_path = "fed_cl_ids/datasets/UAVIDS-2025 Preprocessed.csv"
-    global dataset
-    if dataset is None:
-        dataset =  pd.read_csv(uavids_path).set_index('FlowID')
+    data = load_pd_csv(uavids_path)
     batch_size = int(context.run_config['batch-size'])
-    _, test = split_uavids(dataset, flow_ids, batch_size)
+    _, test = split_uavids(data, flow_ids, batch_size)
 
     metrics = client_evaluate(model, test, device)
     metrics['num-examples'] = len(test)
@@ -132,7 +173,7 @@ def client_evaluate(model: MLP, test_data: DataLoader,
     all_labels = np.array(all_labels)
 
     metrics = {
-        'accuracy': correct / total_samples if total_samples > 0 else 0.0,
+        'accuracy': correct / total_samples if total_samples else 0.0,
         'loss': total_loss / len(test_data),
         'roc-auc': roc_auc(all_labels, all_predictions),
         'pr-auc': pr_auc(all_labels, all_predictions),
