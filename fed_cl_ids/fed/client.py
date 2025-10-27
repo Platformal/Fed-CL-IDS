@@ -1,8 +1,9 @@
 from fed_cl_ids.models.losses import roc_auc, pr_auc, macro_f1, recall_at_fpr
 from flwr.app import ArrayRecord, Context, Message, MetricRecord, RecordDict
+from sklearn.model_selection import train_test_split
 from flwr.clientapp import ClientApp
 from fed_cl_ids.models.mlp import MLP
-from torch.utils.data import DataLoader, TensorDataset, random_split
+from torch.utils.data import DataLoader, TensorDataset
 from torch.nn import CrossEntropyLoss
 from torch import Tensor
 import torch
@@ -14,8 +15,8 @@ import numpy as np
 app = ClientApp()
 
 dataset: pd.DataFrame | None = None
-# Size = 0.5% to 1% of all seen flows
-replay_buffer: list[tuple[Tensor, int]] = []
+# Feature tensors, and label tensor
+replay_buffer: list[tuple[Tensor, Tensor]] = []
 total_flows = 0
 
 # Server sends message of array dict, initialize and load model parameters.
@@ -40,20 +41,19 @@ def load_pd_csv(file_path) -> pd.DataFrame:
         dataset = pd.read_csv(file_path).set_index('FlowID')
     return dataset
 
-def update_replay_buffer(train_data: DataLoader, replay_ratio: float) -> None:
+def update_replay_buffer(train_set: tuple[Tensor, Tensor], replay_ratio: float) -> None:
     """Randomly add samples to replay buffer, maintaining max size."""
     # Total flows should be updated before training
-    global replay_buffer
     new_samples = []
-    for features, labels in train_data:
-        for f, l in zip(features, labels):
-            new_samples.append((f.cpu(), l.item()))
+    features, labels = train_set
+    for feature, label in zip(features, labels):
+        new_samples.append((feature.cpu(), label.cpu()))
+    global replay_buffer
     replay_buffer.extend(new_samples)
 
     max_buffer_size = int(replay_ratio * total_flows)
     if len(replay_buffer) > max_buffer_size:
         replay_buffer = replay_buffer[-max_buffer_size:]
-    print(total_flows, len(replay_buffer))
 
 # Client MLP model needs to receive initial parameters to construct model.
 @app.train()
@@ -69,13 +69,13 @@ def train(msg: Message, context: Context) -> Message:
     uavids_path = "fed_cl_ids/datasets/UAVIDS-2025 Preprocessed.csv"
     data = load_pd_csv(uavids_path)
     batch_size = int(context.run_config['batch-size'])
-    train_data, _ = split_uavids(data, flow_ids, batch_size)
+    train_set, _ = split_uavids(data, flow_ids, batch_size)
     epochs = int(context.run_config['local-epochs'])
-    avg_loss = client_train(model, train_data, epochs, replay_ratio, device)
+    avg_loss = client_train(model, train_set, epochs, replay_ratio, device)
     client_model_params = ArrayRecord(model.state_dict())
     metrics = {
         'train_loss': avg_loss,
-        'num-examples': len(train)
+        'num-examples': len(train_set)
     }
     metric_record = MetricRecord(metrics)
     content = RecordDict({
@@ -85,31 +85,32 @@ def train(msg: Message, context: Context) -> Message:
     return Message(content=content, reply_to=msg)
 
 def client_train(
-        model: MLP, train_data: DataLoader, 
+        model: MLP, train_set: tuple[Tensor, Tensor], 
         n_epochs: int, replay_ratio: float, device: torch.device) -> float:
     criterion = CrossEntropyLoss().to(device)
-    optimizer, scheduler = model.get_optimizer(len(train_data) * 20)
+    optimizer, scheduler = model.get_optimizer(len(train_set) * 20)
     model.train()
     running_loss = 0.0
 
-    
+    features, labels = train_set
+    replay_size = int(replay_ratio * len(features))
+    if replay_buffer and replay_size:
+        samples = random.sample(
+            replay_buffer, min(replay_size, len(replay_buffer)))
+        old_features = torch.stack([feature for feature, _ in samples])
+        old_labels = torch.stack([label for _, label in samples])
+        features = torch.cat((features, old_features))
+        labels = torch.cat((labels, old_labels))
 
+    data = TensorDataset(features, labels)
+    batches = DataLoader(data, batch_size=128, shuffle=True)
     for _ in range(n_epochs):
-        for batch in train_data:
+        for batch in batches:
             features, labels = batch
-
-            replay_size = int(replay_ratio * len(features))
-            if replay_size and len(replay_buffer) >= replay_size:
-                samples = random.sample(
-                    replay_buffer, min(replay_size, len(replay_buffer)))
-                old_features = torch.stack([feature for feature, _ in samples])
-                old_labels = torch.tensor([label for _, label in samples])
-                features = torch.cat((features, old_features))
-                labels = torch.cat((labels, old_labels))
             
             # Move inputs/labels to the correct device and dtypes
             features = features.to(device).to(torch.float32)
-            labels = labels.to(device)#.to(torch.long)
+            labels = labels.to(device).to(torch.long)
             optimizer.zero_grad() # Reset gradient
 
             outputs = model(features) # Forward pass
@@ -120,9 +121,9 @@ def client_train(
             scheduler.step() # Adjust learning rate
             running_loss += loss.item()
 
-    update_replay_buffer(train_data, replay_ratio)
+    update_replay_buffer(train_set, replay_ratio)
             
-    avg_trainloss = running_loss / len(train_data)
+    avg_trainloss = running_loss / len(train_set)
     return avg_trainloss
 
 @app.evaluate()
@@ -134,15 +135,15 @@ def evaluate(msg: Message, context: Context) -> Message:
     uavids_path = "fed_cl_ids/datasets/UAVIDS-2025 Preprocessed.csv"
     data = load_pd_csv(uavids_path)
     batch_size = int(context.run_config['batch-size'])
-    _, test = split_uavids(data, flow_ids, batch_size)
+    _, test_set = split_uavids(data, flow_ids, batch_size)
 
-    metrics = client_evaluate(model, test, device)
-    metrics['num-examples'] = len(test)
+    metrics = client_evaluate(model, test_set, device)
+    metrics['num-examples'] = len(test_set)
     metric_record = MetricRecord(metrics)
     content = RecordDict({'metrics': metric_record})
     return Message(content=content, reply_to=msg)
 
-def client_evaluate(model: MLP, test_data: DataLoader, 
+def client_evaluate(model: MLP, test_data: tuple[Tensor, Tensor], 
                     device: torch.device) -> dict[str, float]:
     model.to(device)
     loss_evaluator = CrossEntropyLoss().to(device)
@@ -150,8 +151,10 @@ def client_evaluate(model: MLP, test_data: DataLoader,
     total_loss = 0.0
     all_predictions, all_probabilities, all_labels = [], [], []
     # Doesn't need gradient descent for evaluation
+    data = TensorDataset(*test_data)
+    batches = DataLoader(dataset=data, batch_size=128, shuffle=True)
     with torch.no_grad():
-        for batch in test_data:
+        for batch in batches:
             features, labels = batch
             features: Tensor = features.to(device).to(torch.float32)
             labels: Tensor = labels.to(device).to(torch.long)
@@ -183,16 +186,23 @@ def client_evaluate(model: MLP, test_data: DataLoader,
     return metrics
 
 # Get flow data from dataframe, split data into train and test
-def split_uavids(df: pd.DataFrame, flows: list[int], n_batches: int):
+def split_uavids(df: pd.DataFrame, flows: list[int], n_batches: int) -> tuple[tuple[Tensor, Tensor], tuple[Tensor, Tensor]]:
     filtered = df.loc[flows]
     features, labels = filtered.drop('label', axis=1), filtered['label']
-    features_tensor = torch.from_numpy(features.to_numpy())
-    labels_tensor = torch.from_numpy(labels.to_numpy())
-    dataset = TensorDataset(features_tensor, labels_tensor)
-
-    train_ratio, test_ratio = (0.8, 0.2)
-    train_set, test_set = random_split(dataset, (train_ratio, test_ratio),
-                                       torch.Generator().manual_seed(0))
-    train = DataLoader(train_set, batch_size=n_batches, shuffle=True)
-    test = DataLoader(test_set, batch_size=n_batches, shuffle=True)
-    return train, test
+    features_np = features.to_numpy('float32')
+    labels_np = labels.to_numpy('uint8')
+    
+    train_ratio = 0.8
+    splits = train_test_split(
+        features_np, labels_np,
+        train_size=train_ratio,
+        random_state=0,
+        stratify=labels_np # Ensure equal distribution among train & test
+    )
+    train_feat, test_feat, train_labels, test_labels = splits
+    # Binarize multi-classification
+    train_set = (torch.from_numpy(train_feat),
+                 torch.from_numpy(train_labels).bool().long())
+    test_set = (torch.from_numpy(test_feat),
+                torch.from_numpy(test_labels).bool().long())
+    return train_set, test_set

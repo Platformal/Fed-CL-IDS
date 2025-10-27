@@ -71,3 +71,6 @@ def main(grid: Grid, context: Context) -> None:
         current_model = result.arrays
         model_dict = result.arrays.to_torch_state_dict()
         torch.save(model_dict, f"fed_cl_ids/outputs/Day{day}.pt")
+        metrics = result.evaluate_metrics_clientapp.popitem()
+        with open("fed_cl_ids/outputs/metrics.txt", 'a') as file:
+            file.write(f"Day {day}:\n{str(metrics)}\n\n")

@@ -70,9 +70,9 @@ def preprocess():
     labels = {
         'Normal Traffic': 0, 
         'Sybil Attack': 1, 
-        'Flooding Attack': 1,
-        'Wormhole Attack': 1, 
-        'Blackhole Attack': 1
+        'Flooding Attack': 2,
+        'Wormhole Attack': 3, 
+        'Blackhole Attack': 4
     }
     initial_df = pd.read_csv("fed_cl_ids/datasets/UAVIDS-2025.csv")
     dropped = ['SrcAddr', 'DstAddr', 'Protocol']
@@ -86,6 +86,6 @@ def preprocess():
 
 if __name__ == "__main__":
     # generate_clients(20)
-    generate_days()
-    # preprocess()
+    # generate_days()
+    preprocess()
     pass
