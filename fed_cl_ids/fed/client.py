@@ -98,6 +98,7 @@ def client_train(
         train_features = torch.cat((train_features, old_features))
         train_labels = torch.cat((train_labels, old_labels))
 
+    total_samples = len(train_labels)
     data = TensorDataset(train_features, train_labels)
     n_batches = int(context.run_config['batch-size'])
     batches = DataLoader(data, batch_size=n_batches, shuffle=True)
@@ -116,13 +117,13 @@ def client_train(
 
             optimizer.step() # Update weights using gradient descent
             scheduler.step() # Adjust learning rate
-            running_loss += loss.item()
+            running_loss += loss.item() * batch_labels.size(0)
 
     global total_flows
-    total_flows += len(train_features)
+    total_flows += total_samples
     update_replay_buffer(train_set, replay_ratio)
 
-    avg_trainloss = running_loss / len(train_features)
+    avg_trainloss = running_loss / total_samples
     return avg_trainloss
 
 @app.evaluate()
@@ -145,13 +146,15 @@ def client_evaluate(
         context: Context, model: MLP, test_set: tuple[Tensor, Tensor], 
         device: torch.device) -> dict[str, float]:
     model.to(device)
+    model.eval()
     loss_evaluator = CrossEntropyLoss().to(device)
-    correct = total_samples = 0
+    correct = 0
     total_loss = 0.0
+    total_samples = len(test_set[1])
     all_predictions, all_probabilities, all_labels = [], [], []
     n_batches = int(context.run_config['batch-size'])
     data = TensorDataset(*test_set)
-    batches = DataLoader(dataset=data, batch_size=n_batches, shuffle=True)
+    batches = DataLoader(dataset=data, batch_size=n_batches, shuffle=False)
     with torch.no_grad():
         for batch in batches:
             features, labels = batch
@@ -163,8 +166,8 @@ def client_evaluate(
             probabilities = torch.softmax(outputs, dim=1)[:,1]
             
             correct += (predictions == labels).sum().item()
-            total_loss += loss_evaluator(outputs, labels).item()
-            total_samples += labels.size(0)
+            batch_loss: Tensor = loss_evaluator(outputs, labels)
+            total_loss += batch_loss.item() * labels.size(0)
 
             all_predictions.extend(predictions.cpu().numpy())
             all_probabilities.extend(probabilities.cpu().numpy())
@@ -175,10 +178,10 @@ def client_evaluate(
     all_labels = np.array(all_labels)
 
     metrics = {
-        'accuracy': correct / total_samples if total_samples else 0.0,
-        'loss': total_loss / len(test_set[0]),
-        'roc-auc': roc_auc(all_labels, all_predictions),
-        'pr-auc': pr_auc(all_labels, all_predictions),
+        'accuracy': correct / total_samples,
+        'loss': total_loss / total_samples,
+        'roc-auc': roc_auc(all_labels, all_probabilities),
+        'pr-auc': pr_auc(all_labels, all_probabilities),
         'macro-f1': macro_f1(all_labels, all_predictions),
         'recall@fpr=1%': recall_at_fpr(all_labels, all_probabilities, 0.01)
     }

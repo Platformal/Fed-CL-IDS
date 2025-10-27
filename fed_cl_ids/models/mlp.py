@@ -40,8 +40,10 @@ class MLP(nn.Module):
         layers.append(output_layer)
         return nn.Sequential(*layers)
 
-    def forward(self, x: Tensor) -> None:
-        return self.network(x)
+    def forward(self, x: Tensor):
+        result = self.network(x)
+        print(type(result))
+        return result
     
     def get_optimizer(self, n_iterations: int) -> tuple[Adam, CosineAnnealingLR]:
         optimizer = Adam(
