@@ -42,8 +42,6 @@ def load_pd_csv(file_path) -> pd.DataFrame:
     return dataset
 
 def update_replay_buffer(train_set: tuple[Tensor, Tensor], replay_ratio: float) -> None:
-    """Randomly add samples to replay buffer, maintaining max size."""
-    # Total flows should be updated before training
     new_samples = []
     features, labels = train_set
     for feature, label in zip(features, labels):
@@ -60,18 +58,12 @@ def update_replay_buffer(train_set: tuple[Tensor, Tensor], replay_ratio: float) 
 def train(msg: Message, context: Context) -> Message:
     device = torch.device('cuda:0' if torch.cuda.is_available() else 'cpu')
     model = load_server_model(msg, context, device)
-    replay_ratio = float(context.run_config['replay-ratio'])    
     flow_ids: list[int] = msg.content['config']['flows']
-
-    global total_flows
-    total_flows += len(flow_ids)
 
     uavids_path = "fed_cl_ids/datasets/UAVIDS-2025 Preprocessed.csv"
     data = load_pd_csv(uavids_path)
-    batch_size = int(context.run_config['batch-size'])
-    train_set, _ = split_uavids(data, flow_ids, batch_size)
-    epochs = int(context.run_config['local-epochs'])
-    avg_loss = client_train(model, train_set, epochs, replay_ratio, device)
+    train_set, _ = split_uavids(data, flow_ids)
+    avg_loss = client_train(context, model, train_set, device)
     client_model_params = ArrayRecord(model.state_dict())
     metrics = {
         'train_loss': avg_loss,
@@ -85,45 +77,52 @@ def train(msg: Message, context: Context) -> Message:
     return Message(content=content, reply_to=msg)
 
 def client_train(
-        model: MLP, train_set: tuple[Tensor, Tensor], 
-        n_epochs: int, replay_ratio: float, device: torch.device) -> float:
+        context: Context, model: MLP, train_set: tuple[Tensor, Tensor], 
+        device: torch.device) -> float:
+    n_epochs = int(context.run_config['local-epochs'])
     criterion = CrossEntropyLoss().to(device)
-    optimizer, scheduler = model.get_optimizer(len(train_set) * 20)
+    optimizer, scheduler = model.get_optimizer(len(train_set) * n_epochs)
     model.train()
     running_loss = 0.0
+    train_features, train_labels = train_set
 
-    features, labels = train_set
-    replay_size = int(replay_ratio * len(features))
+    replay_ratio = float(context.run_config['replay-ratio'])
+    replay_size = int(replay_ratio * len(train_features))
     if replay_buffer and replay_size:
         samples = random.sample(
-            replay_buffer, min(replay_size, len(replay_buffer)))
+            population=replay_buffer, 
+            k=min(replay_size, len(replay_buffer))
+        )
         old_features = torch.stack([feature for feature, _ in samples])
         old_labels = torch.stack([label for _, label in samples])
-        features = torch.cat((features, old_features))
-        labels = torch.cat((labels, old_labels))
+        train_features = torch.cat((train_features, old_features))
+        train_labels = torch.cat((train_labels, old_labels))
 
-    data = TensorDataset(features, labels)
-    batches = DataLoader(data, batch_size=128, shuffle=True)
+    data = TensorDataset(train_features, train_labels)
+    n_batches = int(context.run_config['batch-size'])
+    batches = DataLoader(data, batch_size=n_batches, shuffle=True)
     for _ in range(n_epochs):
         for batch in batches:
-            features, labels = batch
+            batch_features, batch_labels = batch
             
             # Move inputs/labels to the correct device and dtypes
-            features = features.to(device).to(torch.float32)
-            labels = labels.to(device).to(torch.long)
+            batch_features: Tensor = batch_features.to(device)
+            batch_labels: Tensor = batch_labels.to(device)
             optimizer.zero_grad() # Reset gradient
 
-            outputs = model(features) # Forward pass
-            loss = criterion(outputs, labels)
+            outputs: Tensor = model(batch_features) # Forward pass
+            loss: Tensor = criterion(outputs, batch_labels)
             loss.backward() # Computes mini-batch SGD
 
             optimizer.step() # Update weights using gradient descent
             scheduler.step() # Adjust learning rate
             running_loss += loss.item()
 
+    global total_flows
+    total_flows += len(train_features)
     update_replay_buffer(train_set, replay_ratio)
-            
-    avg_trainloss = running_loss / len(train_set)
+
+    avg_trainloss = running_loss / len(train_features)
     return avg_trainloss
 
 @app.evaluate()
@@ -134,30 +133,30 @@ def evaluate(msg: Message, context: Context) -> Message:
     flow_ids: list[int] = msg.content['config']['flows']
     uavids_path = "fed_cl_ids/datasets/UAVIDS-2025 Preprocessed.csv"
     data = load_pd_csv(uavids_path)
-    batch_size = int(context.run_config['batch-size'])
-    _, test_set = split_uavids(data, flow_ids, batch_size)
+    _, test_set = split_uavids(data, flow_ids)
 
-    metrics = client_evaluate(model, test_set, device)
+    metrics = client_evaluate(context, model, test_set, device)
     metrics['num-examples'] = len(test_set)
     metric_record = MetricRecord(metrics)
     content = RecordDict({'metrics': metric_record})
     return Message(content=content, reply_to=msg)
 
-def client_evaluate(model: MLP, test_data: tuple[Tensor, Tensor], 
-                    device: torch.device) -> dict[str, float]:
+def client_evaluate(
+        context: Context, model: MLP, test_set: tuple[Tensor, Tensor], 
+        device: torch.device) -> dict[str, float]:
     model.to(device)
     loss_evaluator = CrossEntropyLoss().to(device)
     correct = total_samples = 0
     total_loss = 0.0
     all_predictions, all_probabilities, all_labels = [], [], []
-    # Doesn't need gradient descent for evaluation
-    data = TensorDataset(*test_data)
-    batches = DataLoader(dataset=data, batch_size=128, shuffle=True)
+    n_batches = int(context.run_config['batch-size'])
+    data = TensorDataset(*test_set)
+    batches = DataLoader(dataset=data, batch_size=n_batches, shuffle=True)
     with torch.no_grad():
         for batch in batches:
             features, labels = batch
-            features: Tensor = features.to(device).to(torch.float32)
-            labels: Tensor = labels.to(device).to(torch.long)
+            features: Tensor = features.to(device)
+            labels: Tensor = labels.to(device)
             outputs: Tensor = model(features)
             predictions = torch.argmax(outputs, dim=1)
             # Outputs probability for each class. Take positive probability
@@ -177,7 +176,7 @@ def client_evaluate(model: MLP, test_data: tuple[Tensor, Tensor],
 
     metrics = {
         'accuracy': correct / total_samples if total_samples else 0.0,
-        'loss': total_loss / len(test_data),
+        'loss': total_loss / len(test_set[0]),
         'roc-auc': roc_auc(all_labels, all_predictions),
         'pr-auc': pr_auc(all_labels, all_predictions),
         'macro-f1': macro_f1(all_labels, all_predictions),
@@ -185,8 +184,7 @@ def client_evaluate(model: MLP, test_data: tuple[Tensor, Tensor],
     }
     return metrics
 
-# Get flow data from dataframe, split data into train and test
-def split_uavids(df: pd.DataFrame, flows: list[int], n_batches: int) -> tuple[tuple[Tensor, Tensor], tuple[Tensor, Tensor]]:
+def split_uavids(df: pd.DataFrame, flows: list[int]) -> tuple[tuple[Tensor, Tensor], tuple[Tensor, Tensor]]:
     filtered = df.loc[flows]
     features, labels = filtered.drop('label', axis=1), filtered['label']
     features_np = features.to_numpy('float32')
@@ -196,11 +194,12 @@ def split_uavids(df: pd.DataFrame, flows: list[int], n_batches: int) -> tuple[tu
     splits = train_test_split(
         features_np, labels_np,
         train_size=train_ratio,
-        random_state=0,
-        stratify=labels_np # Ensure equal distribution among train & test
+        # Ensure equal distribution of traffic types among train and test
+        stratify=labels_np
     )
     train_feat, test_feat, train_labels, test_labels = splits
-    # Binarize multi-classification
+    # Binarize multi-classification labels
+    # CrossEntropyLoss only accepts labels as long dtype
     train_set = (torch.from_numpy(train_feat),
                  torch.from_numpy(train_labels).bool().long())
     test_set = (torch.from_numpy(test_feat),

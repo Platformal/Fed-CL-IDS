@@ -53,7 +53,7 @@ def main(grid: Grid, context: Context) -> None:
     for day in range(1, max_days + 1):
         # Assign each flow to available clients for given day
         client_map = [[] for _ in range(n_train_clients)]
-        for flow_id in uavids_days[f"Day{day}"]:
+        for flow_id in uavids_days[f'Day{day}']:
             id_encoding = str(flow_id).encode()
             id_hash = hashlib.sha256(id_encoding).hexdigest()
             i = int(id_hash, 16) % n_train_clients
@@ -73,4 +73,6 @@ def main(grid: Grid, context: Context) -> None:
         torch.save(model_dict, f"fed_cl_ids/outputs/Day{day}.pt")
         metrics = result.evaluate_metrics_clientapp.popitem()
         with open("fed_cl_ids/outputs/metrics.txt", 'a') as file:
-            file.write(f"Day {day}:\n{str(metrics)}\n\n")
+            file.write(f"Day {day}:\n{str(metrics)}\n")
+    with open("fed_cl_ids/outputs/metrics.txt", 'a') as file:
+        file.write('\n')
