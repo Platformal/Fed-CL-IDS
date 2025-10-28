@@ -15,7 +15,8 @@ import numpy as np
 app = ClientApp()
 
 dataset: pd.DataFrame | None = None
-# Feature tensors, and label tensor
+'''replay_buffer gradually increases to fulfill replay_sample_size;
+the ratio will eventually reach 80:20 as it samples more data'''
 replay_buffer: list[tuple[Tensor, Tensor]] = []
 total_flows = 0
 
@@ -42,10 +43,8 @@ def load_pd_csv(file_path) -> pd.DataFrame:
     return dataset
 
 def update_replay_buffer(train_set: tuple[Tensor, Tensor], replay_ratio: float) -> None:
-    new_samples = []
-    features, labels = train_set
-    for feature, label in zip(features, labels):
-        new_samples.append((feature.cpu(), label.cpu()))
+    new_samples = ((feature.cpu(), label.cpu())
+                   for feature, label in zip(*train_set))
     global replay_buffer
     replay_buffer.extend(new_samples)
 
@@ -80,20 +79,23 @@ def train(msg: Message, context: Context) -> Message:
 def client_train(
         context: Context, model: MLP, train_set: tuple[Tensor, Tensor], 
         device: torch.device) -> float:
+    
     train_features, train_labels = train_set
-    total_samples = len(train_labels)
-
-    replay_ratio = float(context.run_config['replay-ratio'])
-    replay_size = int(replay_ratio * len(train_features))
-    if replay_buffer and replay_size:
+    n_new_samples = len(train_labels)
+    replay_mix_ratio = float(context.run_config['replay-mix'])
+    divisor = (1 - replay_mix_ratio) / replay_mix_ratio
+    replay_sample_size = int(n_new_samples/ divisor)
+    if replay_buffer and replay_sample_size:
         samples = random.sample(
             population=replay_buffer, 
-            k=min(replay_size, len(replay_buffer))
+            k=min(replay_sample_size, len(replay_buffer))
         )
         old_features = torch.stack([feature for feature, _ in samples])
         old_labels = torch.stack([label for _, label in samples])
         train_features = torch.cat((train_features, old_features))
         train_labels = torch.cat((train_labels, old_labels))
+    total_samples = len(train_labels)
+
 
     n_epochs = int(context.run_config['local-epochs'])
     optimizer, scheduler = model.get_optimizer(total_samples * n_epochs)
@@ -123,8 +125,9 @@ def client_train(
             running_loss += loss.item() * batch_labels.size(0)
 
     global total_flows
-    total_flows += total_samples
-    update_replay_buffer(train_set, replay_ratio)
+    total_flows += n_new_samples
+    replay_memory_ratio = float(context.run_config['replay-memory'])
+    update_replay_buffer(train_set, replay_memory_ratio)
 
     avg_trainloss = running_loss / total_samples
     return avg_trainloss
