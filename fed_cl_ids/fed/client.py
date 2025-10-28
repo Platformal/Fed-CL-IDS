@@ -4,7 +4,7 @@ from sklearn.model_selection import train_test_split
 from flwr.clientapp import ClientApp
 from fed_cl_ids.models.mlp import MLP
 from torch.utils.data import DataLoader, TensorDataset
-from torch.nn import CrossEntropyLoss
+from torch.nn import BCEWithLogitsLoss
 from torch import Tensor
 import torch
 import random
@@ -63,6 +63,7 @@ def train(msg: Message, context: Context) -> Message:
     uavids_path = "fed_cl_ids/datasets/UAVIDS-2025 Preprocessed.csv"
     data = load_pd_csv(uavids_path)
     train_set, _ = split_uavids(data, flow_ids)
+
     avg_loss = client_train(context, model, train_set, device)
     client_model_params = ArrayRecord(model.state_dict())
     metrics = {
@@ -79,12 +80,8 @@ def train(msg: Message, context: Context) -> Message:
 def client_train(
         context: Context, model: MLP, train_set: tuple[Tensor, Tensor], 
         device: torch.device) -> float:
-    n_epochs = int(context.run_config['local-epochs'])
-    criterion = CrossEntropyLoss().to(device)
-    optimizer, scheduler = model.get_optimizer(len(train_set) * n_epochs)
-    model.train()
-    running_loss = 0.0
     train_features, train_labels = train_set
+    total_samples = len(train_labels)
 
     replay_ratio = float(context.run_config['replay-ratio'])
     replay_size = int(replay_ratio * len(train_features))
@@ -98,10 +95,15 @@ def client_train(
         train_features = torch.cat((train_features, old_features))
         train_labels = torch.cat((train_labels, old_labels))
 
-    total_samples = len(train_labels)
-    data = TensorDataset(train_features, train_labels)
+    n_epochs = int(context.run_config['local-epochs'])
+    optimizer, scheduler = model.get_optimizer(total_samples * n_epochs)
     n_batches = int(context.run_config['batch-size'])
+    data = TensorDataset(train_features, train_labels)
     batches = DataLoader(data, batch_size=n_batches, shuffle=True)
+    model.train()
+
+    criterion = BCEWithLogitsLoss().to(device)
+    running_loss = 0.0
     for _ in range(n_epochs):
         for batch in batches:
             batch_features, batch_labels = batch
@@ -112,6 +114,7 @@ def client_train(
             optimizer.zero_grad() # Reset gradient
 
             outputs: Tensor = model(batch_features) # Forward pass
+            outputs = outputs.squeeze(1)
             loss: Tensor = criterion(outputs, batch_labels)
             loss.backward() # Computes mini-batch SGD
 
@@ -135,7 +138,6 @@ def evaluate(msg: Message, context: Context) -> Message:
     uavids_path = "fed_cl_ids/datasets/UAVIDS-2025 Preprocessed.csv"
     data = load_pd_csv(uavids_path)
     _, test_set = split_uavids(data, flow_ids)
-
     metrics = client_evaluate(context, model, test_set, device)
     metrics['num-examples'] = len(test_set)
     metric_record = MetricRecord(metrics)
@@ -147,7 +149,7 @@ def client_evaluate(
         device: torch.device) -> dict[str, float]:
     model.to(device)
     model.eval()
-    loss_evaluator = CrossEntropyLoss().to(device)
+    loss_evaluator = BCEWithLogitsLoss().to(device)
     correct = 0
     total_loss = 0.0
     total_samples = len(test_set[1])
@@ -161,12 +163,12 @@ def client_evaluate(
             features: Tensor = features.to(device)
             labels: Tensor = labels.to(device)
             outputs: Tensor = model(features)
-            predictions = torch.argmax(outputs, dim=1)
-            # Outputs probability for each class. Take positive probability
-            probabilities = torch.softmax(outputs, dim=1)[:,1]
+            outputs = outputs.squeeze(1)
+            probabilities = torch.sigmoid(outputs)
+            predictions = (probabilities >= 0.5).long()
             
             correct += (predictions == labels).sum().item()
-            batch_loss: Tensor = loss_evaluator(outputs, labels)
+            batch_loss: Tensor = loss_evaluator(outputs, labels.float())
             total_loss += batch_loss.item() * labels.size(0)
 
             all_predictions.extend(predictions.cpu().numpy())
@@ -197,14 +199,16 @@ def split_uavids(df: pd.DataFrame, flows: list[int]) -> tuple[tuple[Tensor, Tens
     splits = train_test_split(
         features_np, labels_np,
         train_size=train_ratio,
-        # Ensure equal distribution of traffic types among train and test
-        stratify=labels_np
+        stratify=labels_np,
+        # Make sure train & test same seed for train and evaluation.
+        # Risks data leaking if not set to a value both use
+        random_state=42
     )
     train_feat, test_feat, train_labels, test_labels = splits
-    # Binarize multi-classification labels
-    # CrossEntropyLoss only accepts labels as long dtype
+    # .bool() to binarize and .float() since output is a float [0,1]
+    # Assuming label 0 is normal/benign traffic
     train_set = (torch.from_numpy(train_feat),
-                 torch.from_numpy(train_labels).bool().long())
+                 torch.from_numpy(train_labels).bool().float())
     test_set = (torch.from_numpy(test_feat),
-                torch.from_numpy(test_labels).bool().long())
+                torch.from_numpy(test_labels).bool().float())
     return train_set, test_set

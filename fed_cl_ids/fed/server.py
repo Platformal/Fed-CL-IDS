@@ -38,7 +38,8 @@ def main(grid: Grid, context: Context) -> None:
     device = torch.device('cuda:0' if torch.cuda.is_available() else 'cpu')
     central_model.to(device)
 
-    n_train_clients = int(len(list(grid.get_node_ids())) * fraction_train)
+    total_clients = len(list(grid.get_node_ids()))
+    n_train_clients = int(total_clients * fraction_train)
 
     # Range of days with list of flows for the day
     uavids_days = yaml.safe_load(open("fed_cl_ids/data_pipeline/splits/uavids_days.yaml"))
@@ -52,6 +53,7 @@ def main(grid: Grid, context: Context) -> None:
     current_model: ArrayRecord = initial_model
     for day in range(1, max_days + 1):
         # Assign each flow to available clients for given day
+        # Deterministic
         client_map = [[] for _ in range(n_train_clients)]
         for flow_id in uavids_days[f'Day{day}']:
             id_encoding = str(flow_id).encode()
@@ -73,6 +75,9 @@ def main(grid: Grid, context: Context) -> None:
         torch.save(model_dict, f"fed_cl_ids/outputs/Day{day}.pt")
         metrics = result.evaluate_metrics_clientapp.popitem()
         with open("fed_cl_ids/outputs/metrics.txt", 'a') as file:
-            file.write(f"Day {day}:\n{str(metrics)}\n")
+            file.write(
+                f"Day {day}: {n_train_clients}/{total_clients} clients: "
+                f"{str(metrics)}\n"
+            )
     with open("fed_cl_ids/outputs/metrics.txt", 'a') as file:
         file.write('\n')

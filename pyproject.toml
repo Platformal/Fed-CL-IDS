@@ -37,8 +37,8 @@ clientapp = "fed_cl_ids.fed.client:app"
 [tool.flwr.app.config]
 n-rounds = 80
 max-days = 4
-fraction-train = 1
-fraction-evaluate = 1
+fraction-train = 1.0
+fraction-evaluate = 1.0
 local-epochs = 2
 replay-buffer = 1000
 replay-ratio = 0.005

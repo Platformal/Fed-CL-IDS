@@ -36,15 +36,13 @@ class MLP(nn.Module):
                 nn.Dropout(self.dropout)
             ))
             prev_dimension = width
-        output_layer = nn.Linear(prev_dimension, self.n_classes) # Final output
+        output_layer = nn.Linear(prev_dimension, 1) # Final output, binary
         layers.append(output_layer)
         return nn.Sequential(*layers)
 
-    def forward(self, x: Tensor):
-        result = self.network(x)
-        print(type(result))
-        return result
-    
+    def forward(self, x: Tensor) -> Tensor:
+        return self.network(x)
+
     def get_optimizer(self, n_iterations: int) -> tuple[Adam, CosineAnnealingLR]:
         optimizer = Adam(
             self.parameters(),

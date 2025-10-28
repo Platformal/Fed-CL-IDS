@@ -71,8 +71,7 @@ class UAVIDSFedAvg(FedAvg):
         for i, message in enumerate(messages):
             client_content = message.content.copy()
             client_content['config'] = client_content['config'].copy()
-            # If N train clients < N evaluate clients
-            client_content['config']['flows'] = flows[i % len(flows)]
+            client_content['config']['flows'] = flows[i]
             message.content = client_content
         return messages
     
