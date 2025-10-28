@@ -1,22 +1,20 @@
 from fed_cl_ids.models.losses import roc_auc, pr_auc, macro_f1, recall_at_fpr
-from flwr.app import ArrayRecord, Context, Message, MetricRecord, RecordDict
 from sklearn.model_selection import train_test_split
+from flwr.app import ArrayRecord, Context, Message, MetricRecord, RecordDict
 from flwr.clientapp import ClientApp
 from fed_cl_ids.models.mlp import MLP
 from torch.utils.data import DataLoader, TensorDataset
 from torch.nn import BCEWithLogitsLoss
 from torch import Tensor
 import torch
-import random
 import pandas as pd
 import numpy as np
+import random
 
 # Flower ClientApp
 app = ClientApp()
 
 dataset: pd.DataFrame | None = None
-'''replay_buffer gradually increases to fulfill replay_sample_size;
-the ratio will eventually reach 80:20 as it samples more data'''
 replay_buffer: list[tuple[Tensor, Tensor]] = []
 total_flows = 0
 
@@ -42,15 +40,21 @@ def load_pd_csv(file_path) -> pd.DataFrame:
         dataset = pd.read_csv(file_path).set_index('FlowID')
     return dataset
 
+# If episodic memory = 0.05%, then it needs 200 to store 1 to replay buffer.
+# Could become a problem as more clients means less data to receive.
 def update_replay_buffer(train_set: tuple[Tensor, Tensor], replay_ratio: float) -> None:
-    new_samples = ((feature.cpu(), label.cpu())
-                   for feature, label in zip(*train_set))
+    data_length = len(train_set[1])
+    n_samples = int(data_length * replay_ratio)
+    if not n_samples:
+        return
+    samples = random.sample(tuple(zip(*train_set)), n_samples)
     global replay_buffer
-    replay_buffer.extend(new_samples)
+    replay_buffer.extend(samples)
 
     max_buffer_size = int(replay_ratio * total_flows)
     if len(replay_buffer) > max_buffer_size:
         replay_buffer = replay_buffer[-max_buffer_size:]
+    print(len(replay_buffer))
 
 # Client MLP model needs to receive initial parameters to construct model.
 @app.train()
@@ -82,9 +86,10 @@ def client_train(
     
     train_features, train_labels = train_set
     n_new_samples = len(train_labels)
-    replay_mix_ratio = float(context.run_config['replay-mix'])
+    replay_mix_ratio = float(context.run_config['er-mix'])
     divisor = (1 - replay_mix_ratio) / replay_mix_ratio
     replay_sample_size = int(n_new_samples/ divisor)
+    # Ratio will be off until replay_buffer size is >= replay_sample_size
     if replay_buffer and replay_sample_size:
         samples = random.sample(
             population=replay_buffer, 
@@ -95,7 +100,6 @@ def client_train(
         train_features = torch.cat((train_features, old_features))
         train_labels = torch.cat((train_labels, old_labels))
     total_samples = len(train_labels)
-
 
     n_epochs = int(context.run_config['local-epochs'])
     optimizer, scheduler = model.get_optimizer(total_samples * n_epochs)
@@ -126,7 +130,7 @@ def client_train(
 
     global total_flows
     total_flows += n_new_samples
-    replay_memory_ratio = float(context.run_config['replay-memory'])
+    replay_memory_ratio = float(context.run_config['er-memory'])
     update_replay_buffer(train_set, replay_memory_ratio)
 
     avg_trainloss = running_loss / total_samples
