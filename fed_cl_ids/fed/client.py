@@ -1,8 +1,8 @@
-from fed_cl_ids.models.losses import roc_auc, pr_auc, macro_f1, recall_at_fpr
+from fed_cl_ids.models.losses import Losses
+from fed_cl_ids.models.mlp import MLP
 from sklearn.model_selection import train_test_split
 from flwr.app import ArrayRecord, Context, Message, MetricRecord, RecordDict
 from flwr.clientapp import ClientApp
-from fed_cl_ids.models.mlp import MLP
 from torch.utils.data import DataLoader, TensorDataset
 from torch.nn import BCEWithLogitsLoss
 from torch import Tensor
@@ -19,7 +19,7 @@ replay_buffer: list[tuple[Tensor, Tensor]] = []
 total_flows = 0
 
 # Server sends message of array dict, initialize and load model parameters.
-def load_server_model(msg: Message, context: Context, device: torch.device) -> MLP:
+def new_server_model(msg: Message, context: Context, device: torch.device) -> MLP:
     widths = str(context.run_config['mlp-width'])
     model = MLP(
         n_features=int(context.run_config['n-features']),
@@ -34,33 +34,41 @@ def load_server_model(msg: Message, context: Context, device: torch.device) -> M
     model.load_state_dict(model_params)
     return model.to(device)
 
+def split_uavids(df: pd.DataFrame, flows: list[int]) -> tuple[tuple[Tensor, Tensor], tuple[Tensor, Tensor]]:
+    filtered = df.loc[flows]
+    features, labels = filtered.drop('label', axis=1), filtered['label']
+    features_np = features.to_numpy('float32')
+    labels_np = labels.to_numpy('uint8')
+    
+    train_ratio = 0.8
+    splits = train_test_split(
+        features_np, labels_np,
+        train_size=train_ratio,
+        # Equal distribution of labels for train and evaluate
+        stratify=labels_np,
+        # Risks data leaking if not set to a value both use
+        random_state=42
+    )
+    train_feat, test_feat, train_labels, test_labels = splits
+    # .bool() to binarize and .float() since output is a float [0,1]
+    # Assuming label 0 is normal/benign traffic
+    train_set = (torch.from_numpy(train_feat),
+                 torch.from_numpy(train_labels).bool().float())
+    test_set = (torch.from_numpy(test_feat),
+                torch.from_numpy(test_labels).bool().float())
+    return train_set, test_set
+
 def load_pd_csv(file_path) -> pd.DataFrame:
     global dataset
     if dataset is None:
         dataset = pd.read_csv(file_path).set_index('FlowID')
     return dataset
 
-# If episodic memory = 0.05%, then it needs 200 to store 1 to replay buffer.
-# Could become a problem as more clients means less data to receive.
-def update_replay_buffer(train_set: tuple[Tensor, Tensor], replay_ratio: float) -> None:
-    data_length = len(train_set[1])
-    n_samples = int(data_length * replay_ratio)
-    if not n_samples:
-        return
-    samples = random.sample(tuple(zip(*train_set)), n_samples)
-    global replay_buffer
-    replay_buffer.extend(samples)
-
-    max_buffer_size = int(replay_ratio * total_flows)
-    if len(replay_buffer) > max_buffer_size:
-        replay_buffer = replay_buffer[-max_buffer_size:]
-    print(len(replay_buffer))
-
 # Client MLP model needs to receive initial parameters to construct model.
 @app.train()
 def train(msg: Message, context: Context) -> Message:
     device = torch.device('cuda:0' if torch.cuda.is_available() else 'cpu')
-    model = load_server_model(msg, context, device)
+    model = new_server_model(msg, context, device)
     flow_ids: list[int] = msg.content['config']['flows']
 
     uavids_path = "fed_cl_ids/datasets/UAVIDS-2025 Preprocessed.csv"
@@ -89,7 +97,7 @@ def client_train(
     replay_mix_ratio = float(context.run_config['er-mix'])
     divisor = (1 - replay_mix_ratio) / replay_mix_ratio
     replay_sample_size = int(n_new_samples/ divisor)
-    # Ratio will be off until replay_buffer size is >= replay_sample_size
+    # Ratio will be off until replay_buffer size >= replay_sample_size
     if replay_buffer and replay_sample_size:
         samples = random.sample(
             population=replay_buffer, 
@@ -102,22 +110,19 @@ def client_train(
     total_samples = len(train_labels)
 
     n_epochs = int(context.run_config['local-epochs'])
-    optimizer, scheduler = model.get_optimizer(total_samples * n_epochs)
     n_batches = int(context.run_config['batch-size'])
     data = TensorDataset(train_features, train_labels)
     batches = DataLoader(data, batch_size=n_batches, shuffle=True)
-    model.train()
-
+    optimizer, scheduler = model.get_optimizer(total_samples * n_epochs)
     criterion = BCEWithLogitsLoss().to(device)
     running_loss = 0.0
+    model.train()
+    
     for _ in range(n_epochs):
         for batch in batches:
             batch_features, batch_labels = batch
-            
-            # Move inputs/labels to the correct device and dtypes
             batch_features: Tensor = batch_features.to(device)
             batch_labels: Tensor = batch_labels.to(device)
-            optimizer.zero_grad() # Reset gradient
 
             outputs: Tensor = model(batch_features) # Forward pass
             outputs = outputs.squeeze(1)
@@ -127,6 +132,7 @@ def client_train(
             optimizer.step() # Update weights using gradient descent
             scheduler.step() # Adjust learning rate
             running_loss += loss.item() * batch_labels.size(0)
+            optimizer.zero_grad() # Reset for next batch
 
     global total_flows
     total_flows += n_new_samples
@@ -136,11 +142,25 @@ def client_train(
     avg_trainloss = running_loss / total_samples
     return avg_trainloss
 
+# If episodic memory = 0.05%, then it needs 200 to store 1 to replay buffer.
+# Could become a problem as more clients means less flows received.
+def update_replay_buffer(train_set: tuple[Tensor, Tensor], replay_ratio: float) -> None:
+    data_length = len(train_set[1])
+    n_samples = int(data_length * replay_ratio)
+    if not n_samples:
+        return
+    samples = random.sample(tuple(zip(*train_set)), n_samples)
+    global replay_buffer
+    replay_buffer.extend(samples)
+
+    max_buffer_size = int(replay_ratio * total_flows)
+    if len(replay_buffer) > max_buffer_size:
+        replay_buffer = replay_buffer[-max_buffer_size:]
+
 @app.evaluate()
 def evaluate(msg: Message, context: Context) -> Message:
     device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
-    model = load_server_model(msg, context, device)
-
+    model = new_server_model(msg, context, device)
     flow_ids: list[int] = msg.content['config']['flows']
     uavids_path = "fed_cl_ids/datasets/UAVIDS-2025 Preprocessed.csv"
     data = load_pd_csv(uavids_path)
@@ -154,7 +174,6 @@ def evaluate(msg: Message, context: Context) -> Message:
 def client_evaluate(
         context: Context, model: MLP, test_set: tuple[Tensor, Tensor], 
         device: torch.device) -> dict[str, float]:
-    model.to(device)
     model.eval()
     loss_evaluator = BCEWithLogitsLoss().to(device)
     correct = 0
@@ -189,33 +208,9 @@ def client_evaluate(
     metrics = {
         'accuracy': correct / total_samples,
         'loss': total_loss / total_samples,
-        'roc-auc': roc_auc(all_labels, all_probabilities),
-        'pr-auc': pr_auc(all_labels, all_probabilities),
-        'macro-f1': macro_f1(all_labels, all_predictions),
-        'recall@fpr=1%': recall_at_fpr(all_labels, all_probabilities, 0.01)
+        'roc-auc': Losses.roc_auc(all_labels, all_probabilities),
+        'pr-auc': Losses.pr_auc(all_labels, all_probabilities),
+        'macro-f1': Losses.macro_f1(all_labels, all_predictions),
+        'recall@fpr=1%': Losses.recall_at_fpr(all_labels, all_probabilities, 0.01)
     }
     return metrics
-
-def split_uavids(df: pd.DataFrame, flows: list[int]) -> tuple[tuple[Tensor, Tensor], tuple[Tensor, Tensor]]:
-    filtered = df.loc[flows]
-    features, labels = filtered.drop('label', axis=1), filtered['label']
-    features_np = features.to_numpy('float32')
-    labels_np = labels.to_numpy('uint8')
-    
-    train_ratio = 0.8
-    splits = train_test_split(
-        features_np, labels_np,
-        train_size=train_ratio,
-        stratify=labels_np,
-        # Make sure train & test same seed for train and evaluation.
-        # Risks data leaking if not set to a value both use
-        random_state=42
-    )
-    train_feat, test_feat, train_labels, test_labels = splits
-    # .bool() to binarize and .float() since output is a float [0,1]
-    # Assuming label 0 is normal/benign traffic
-    train_set = (torch.from_numpy(train_feat),
-                 torch.from_numpy(train_labels).bool().float())
-    test_set = (torch.from_numpy(test_feat),
-                torch.from_numpy(test_labels).bool().float())
-    return train_set, test_set

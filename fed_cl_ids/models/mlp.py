@@ -45,7 +45,7 @@ class MLP(nn.Module):
 
     def get_optimizer(self, n_iterations: int) -> tuple[Adam, CosineAnnealingLR]:
         optimizer = Adam(
-            self.parameters(),
+            params=self.parameters(),
             lr=self.lr_max,
             weight_decay=self.weight_decay
         )
