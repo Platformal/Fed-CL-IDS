@@ -17,6 +17,7 @@ app = ClientApp()
 dataset: pd.DataFrame | None = None
 
 # Experience replay variables
+# No ndarrays due to static size
 replay_buffer: list[tuple[Tensor, Tensor]] = []
 total_flows: int = 0
 
@@ -105,6 +106,7 @@ def client_train(
     n_new_samples = len(train_labels)
 
     if continual_learning:
+        global total_flows, replay_buffer
         replay_mix_ratio = float(context.run_config['er-mix'])
         true_ratio = (1 - replay_mix_ratio) / replay_mix_ratio
         replay_sample_size = int(n_new_samples/ true_ratio)
@@ -121,11 +123,11 @@ def client_train(
             train_labels = torch.cat((train_labels, old_labels))
 
     total_samples = len(train_labels)
-    n_epochs = int(context.run_config['local-epochs'])
     n_batches = int(context.run_config['batch-size'])
     data = TensorDataset(train_features, train_labels)
     batches = DataLoader(data, batch_size=n_batches, shuffle=True)
 
+    n_epochs = int(context.run_config['local-epochs'])
     optimizer, scheduler = model.get_optimizer(total_samples * n_epochs)
     criterion = BCEWithLogitsLoss().to(device)
     running_loss = 0.0
@@ -168,10 +170,12 @@ def client_train(
     if not continual_learning:
         return avg_loss
 
-    global total_flows
     total_flows += n_new_samples
-    replay_memory_ratio = float(context.run_config['er-memory'])
-    update_replay_buffer(train_set, replay_memory_ratio)
+    pick_rate = float(context.run_config['er-memory'])
+    sampler = ((feature, label) 
+               for feature, label in zip(*train_set)
+               if random.random() < pick_rate)
+    replay_buffer.extend(sampler)
 
     fisher_diagonal = fisher_information(model, train_set, n_batches, criterion)
     previous_parameters = {
@@ -183,7 +187,6 @@ def client_train(
 
 def fisher_information(model: MLP, train_set: tuple[Tensor, Tensor], n_batches: int,
                         criterion: BCEWithLogitsLoss) -> dict[str, Tensor]:
-    # Doesn't need to go back to train since training is done
     model.eval()
     fisher: dict[str, Tensor] = {
         name: torch.zeros_like(parameter)
@@ -212,21 +215,6 @@ def fisher_information(model: MLP, train_set: tuple[Tensor, Tensor], n_batches: 
         fisher[name] /= n_samples
 
     return fisher
-        
-# If episodic memory = 0.05%, then it needs 200 to store 1 to replay buffer.
-# Replace with random mask per element
-def update_replay_buffer(train_set: tuple[Tensor, Tensor], replay_ratio: float) -> None:
-    data_length = len(train_set[1])
-    n_samples = int(data_length * replay_ratio)
-    if not n_samples:
-        return
-    samples = random.sample(tuple(zip(*train_set)), n_samples)
-    global replay_buffer
-    replay_buffer.extend(samples)
-
-    max_buffer_size = int(replay_ratio * total_flows)
-    if len(replay_buffer) > max_buffer_size:
-        replay_buffer = replay_buffer[-max_buffer_size:]
 
 @app.evaluate()
 def evaluate(msg: Message, context: Context) -> Message:
