@@ -15,8 +15,14 @@ import random
 app = ClientApp()
 
 dataset: pd.DataFrame | None = None
+
+# Experience replay variables
 replay_buffer: list[tuple[Tensor, Tensor]] = []
-total_flows = 0
+total_flows: int = 0
+
+# Elastic weight consolidation variables
+previous_parameters: dict[str, Tensor] | None = None
+fisher_diagonal: dict[str, Tensor] | None = None
 
 # Server sends message of array dict, initialize and load model parameters.
 def new_server_model(msg: Message, context: Context, device: torch.device) -> MLP:
@@ -46,7 +52,7 @@ def split_uavids(df: pd.DataFrame, flows: list[int]) -> tuple[tuple[Tensor, Tens
         train_size=train_ratio,
         # Equal distribution of labels for train and evaluate
         stratify=labels_np,
-        # Risks data leaking if not set to a value both use
+        # Risks data leaking if not set to a value both train & eval use
         random_state=42
     )
     train_feat, test_feat, train_labels, test_labels = splits
@@ -93,31 +99,38 @@ def client_train(
         device: torch.device) -> float:
     
     train_features, train_labels = train_set
-    n_new_samples = len(train_labels)
-    replay_mix_ratio = float(context.run_config['er-mix'])
-    divisor = (1 - replay_mix_ratio) / replay_mix_ratio
-    replay_sample_size = int(n_new_samples/ divisor)
-    # Ratio will be off until replay_buffer size >= replay_sample_size
-    if replay_buffer and replay_sample_size:
-        samples = random.sample(
-            population=replay_buffer, 
-            k=min(replay_sample_size, len(replay_buffer))
-        )
-        old_features = torch.stack([feature for feature, _ in samples])
-        old_labels = torch.stack([label for _, label in samples])
-        train_features = torch.cat((train_features, old_features))
-        train_labels = torch.cat((train_labels, old_labels))
-    total_samples = len(train_labels)
 
+    continual_learning = bool(context.run_config['cl-enabled'])
+    ewc_half_lambda = int(context.run_config['ewc-lambda']) / 2
+    n_new_samples = len(train_labels)
+
+    if continual_learning:
+        replay_mix_ratio = float(context.run_config['er-mix'])
+        true_ratio = (1 - replay_mix_ratio) / replay_mix_ratio
+        replay_sample_size = int(n_new_samples/ true_ratio)
+
+        # Ratio will be off until replay_buffer size >= replay_sample_size
+        if replay_buffer and replay_sample_size:
+            samples = random.sample(
+                population=replay_buffer, 
+                k=min(replay_sample_size, len(replay_buffer))
+            )
+            old_features = torch.stack([feature for feature, _ in samples])
+            old_labels = torch.stack([label for _, label in samples])
+            train_features = torch.cat((train_features, old_features))
+            train_labels = torch.cat((train_labels, old_labels))
+
+    total_samples = len(train_labels)
     n_epochs = int(context.run_config['local-epochs'])
     n_batches = int(context.run_config['batch-size'])
     data = TensorDataset(train_features, train_labels)
     batches = DataLoader(data, batch_size=n_batches, shuffle=True)
+
     optimizer, scheduler = model.get_optimizer(total_samples * n_epochs)
     criterion = BCEWithLogitsLoss().to(device)
     running_loss = 0.0
     model.train()
-    
+
     for _ in range(n_epochs):
         for batch in batches:
             batch_features, batch_labels = batch
@@ -127,23 +140,81 @@ def client_train(
             outputs: Tensor = model(batch_features) # Forward pass
             outputs = outputs.squeeze(1)
             loss: Tensor = criterion(outputs, batch_labels)
-            loss.backward() # Computes mini-batch SGD
 
+            if continual_learning:
+                global previous_parameters, fisher_diagonal
+                if not (previous_parameters and fisher_diagonal):
+                    break
+                ewc_loss = 0.0
+                # penalty = (λ/2) * Σ F_i(θ_i - θ*_i)²
+                for name, parameter in model.named_parameters():
+                    # Doesn't catch anything, defined by fisher function
+                    if name not in previous_parameters:
+                        print(f"{name} not in previous_params")
+                        continue
+                    f_i = fisher_diagonal[name]
+                    nested_term = parameter - previous_parameters[name]
+                    nested_term = nested_term.pow(2)
+                    penalty = f_i * nested_term
+                    ewc_loss += penalty.sum()
+                loss += ewc_half_lambda * ewc_loss
+            
+            loss.backward() # Computes mini-batch SGD
             optimizer.step() # Update weights using gradient descent
             scheduler.step() # Adjust learning rate
-            running_loss += loss.item() * batch_labels.size(0)
             optimizer.zero_grad() # Reset for next batch
+            running_loss += loss.item() * batch_labels.size(0)
+    avg_loss = running_loss / total_samples
+    if not continual_learning:
+        return avg_loss
 
     global total_flows
     total_flows += n_new_samples
     replay_memory_ratio = float(context.run_config['er-memory'])
     update_replay_buffer(train_set, replay_memory_ratio)
 
-    avg_trainloss = running_loss / total_samples
-    return avg_trainloss
+    fisher_diagonal = fisher_information(model, train_set, n_batches, criterion)
+    previous_parameters = {
+        name: parameter.clone().detach()
+        for name, parameter in model.named_parameters()
+        if parameter.requires_grad
+    }
+    return avg_loss
 
+def fisher_information(model: MLP, train_set: tuple[Tensor, Tensor], n_batches: int,
+                        criterion: BCEWithLogitsLoss) -> dict[str, Tensor]:
+    # Doesn't need to go back to train since training is done
+    model.eval()
+    fisher: dict[str, Tensor] = {
+        name: torch.zeros_like(parameter)
+        for name, parameter in model.named_parameters()
+        if parameter.requires_grad
+    }
+    data = TensorDataset(*train_set)
+    batches = DataLoader(data, batch_size=n_batches, shuffle=False)
+    for batch in batches:
+        features, labels = batch
+        model.zero_grad()
+
+        outputs: Tensor = model(features)
+        outputs = outputs.squeeze(1)
+        loss: Tensor = criterion(outputs, labels)
+        loss.backward()
+
+        # Sum of square gradients
+        for name, parameter in model.named_parameters():
+            if parameter.grad is not None:
+                fisher[name] += parameter.grad.detach() ** 2
+    
+    # Averaging out after total sum calculated
+    n_samples = len(batches)
+    for name in fisher:
+        fisher[name] /= n_samples
+
+    return fisher
+        
 # If episodic memory = 0.05%, then it needs 200 to store 1 to replay buffer.
-# Could become a problem as more clients means less flows received.
+# Replace with random mask per element
 def update_replay_buffer(train_set: tuple[Tensor, Tensor], replay_ratio: float) -> None:
     data_length = len(train_set[1])
     n_samples = int(data_length * replay_ratio)
@@ -179,9 +250,10 @@ def client_evaluate(
     correct = 0
     total_loss = 0.0
     total_samples = len(test_set[1])
-    all_predictions, all_probabilities, all_labels = [], [], []
+    all_predictions, all_probabilities =  [], []
     n_batches = int(context.run_config['batch-size'])
-    data = TensorDataset(*test_set)
+    test_features, test_labels = test_set
+    data = TensorDataset(test_features, test_labels)
     batches = DataLoader(dataset=data, batch_size=n_batches, shuffle=False)
     with torch.no_grad():
         for batch in batches:
@@ -199,11 +271,10 @@ def client_evaluate(
 
             all_predictions.extend(predictions.cpu().numpy())
             all_probabilities.extend(probabilities.cpu().numpy())
-            all_labels.extend(labels.cpu().numpy())
     
     all_predictions = np.array(all_predictions)
     all_probabilities = np.array(all_probabilities)
-    all_labels = np.array(all_labels)
+    all_labels = test_labels.numpy()
 
     metrics = {
         'accuracy': correct / total_samples,
