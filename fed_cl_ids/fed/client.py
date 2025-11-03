@@ -24,7 +24,6 @@ class Client:
         # toml configurables
         self.epochs: int
         self.cl_enabled: bool
-        self.ewc_lambda: float
         self.ewc_half_lambda: float
         self.er_sample_rate: float
         self.er_priority: float
@@ -66,7 +65,6 @@ class Client:
         '''
         Split client's dataframe into train and test sets.\n
         ****
-        If flows passed in, this will assume it's UAVIDS-2025 dataset\n
         **label_parity**: bool\n
         Whether to distribute multi-class labels evenly.
         '''
@@ -119,7 +117,8 @@ class Client:
         data = TensorDataset(train_features, train_labels)
         batches = DataLoader(data, batch_size=self.batch_size, shuffle=True)
 
-        iterations = total_samples * self.epochs
+        # Optimizer corresponds per batch, not sample
+        iterations = len(batches) * self.epochs
         optimizer, scheduler = self.model.get_optimizer(iterations)
         running_loss = 0.0
         self.model.train()
@@ -132,8 +131,7 @@ class Client:
                 outputs = outputs.squeeze(1)
                 loss: Tensor = self.criterion(outputs, batch_labels)
 
-                # Double conditional?
-                if self.cl_enabled and self.prev_parameters and self.fisher_diagonal:
+                if self.cl_enabled and self.prev_parameters:
                     ewc_loss = 0.0
                     # penalty = (λ/2) * Σ F_i(θ_i - θ*_i)²
                     for name, parameter in self.model.named_parameters():
@@ -158,9 +156,9 @@ class Client:
             return avg_loss
 
         self.total_flows += n_new_samples
-        sampler = ((feature, label) 
+        sampler = [(feature, label) 
                 for feature, label in zip(*train_set)
-                if random.random() < self.er_sample_rate)
+                if random.random() < self.er_sample_rate]
         self.replay_buffer.extend(sampler)
 
         self.fisher_diagonal = self._fisher_information(train_set)
@@ -184,16 +182,16 @@ class Client:
         for batch in batches:
             features, labels = batch
             self.model.zero_grad()
-
             outputs: Tensor = self.model(features)
             outputs = outputs.squeeze(1)
             loss: Tensor = self.criterion(outputs, labels)
             loss.backward()
 
             # Sum of square gradients
-            for name, parameter in self.model.named_parameters():
-                if parameter.grad is not None:
-                    fisher[name] += parameter.grad.detach() ** 2
+            with torch.no_grad():
+                for name, parameter in self.model.named_parameters():
+                    if parameter.grad is not None:
+                        fisher[name] += parameter.grad.detach().pow(2)
         
         # Averaging out after total sum calculated
         n_samples = len(batches)
@@ -244,13 +242,12 @@ class Client:
         return metrics
     
 def assign_context(client_function):
-    def wrapper(msg: Message, context: Context):
+    def wrapper(msg: Message, context: Context) -> Message:
         if not client._has_context:
             client._initialize_model(context)
             client.epochs = int(context.run_config['epochs'])
             client.cl_enabled = bool(context.run_config['cl-enabled'])
-            client.ewc_lambda = float(context.run_config['ewc-lambda'])
-            client.ewc_half_lambda = client.ewc_lambda / 2
+            client.ewc_half_lambda = float(context.run_config['ewc-lambda']) / 2
             client.er_sample_rate = float(context.run_config['er-memory'])
             client.er_priority = float(context.run_config['er-alpha'])
             client.batch_size = int(context.run_config['batch-size'])
@@ -272,7 +269,7 @@ def new_train(msg: Message) -> Message:
     client_model_params = ArrayRecord(client.model.state_dict())
     metrics = {
         'train_loss': average_loss,
-        'num-examples': len(train_set)
+        'num-examples': len(train_set[1])
     }
     metric_record = MetricRecord(metrics)
     content = RecordDict({
@@ -290,7 +287,7 @@ def new_evaluate(msg: Message) -> Message:
     _, test_set = client.train_test_split(flow_ids)
 
     metrics = client.evaluate(test_set)
-    metrics['num-examples'] = len(test_set)
+    metrics['num-examples'] = len(test_set[1])
     metric_record = MetricRecord(metrics)
     content = RecordDict({'metrics': metric_record})
     return Message(content=content, reply_to=msg)

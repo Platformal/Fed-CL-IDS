@@ -38,6 +38,8 @@ def main(grid: Grid, context: Context) -> None:
     # Strategy needs to be in loop. Reassigns sampled clients if need be.
     strategy = UAVIDSFedAvg(fraction_train, fraction_eval)
 
+    import time
+    start = time.time()
     current_model = ArrayRecord(initial_model.state_dict())
     for day in range(1, max_days + 1):
         # Assign each flow to available clients for given day
@@ -68,3 +70,4 @@ def main(grid: Grid, context: Context) -> None:
         torch.save(model_dict, f"fed_cl_ids/outputs/Day{day}.pt")
     with open("fed_cl_ids/outputs/metrics.txt", 'a') as file:
         file.write('\n')
+    print(time.time() - start)
