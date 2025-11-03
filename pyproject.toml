@@ -39,21 +39,19 @@ n-rounds = 80
 max-days = 4
 fraction-train = 0.5
 fraction-evaluate = 0.5
-local-epochs = 2
+epochs = 2
 cl-enabled = true
 ewc-lambda = 50
-replay-buffer = 1000
 er-memory = 0.005
-er-mix = 0.2 # (0, 1)
+er-alpha = 0.2 # (0, 1)
 n-features = 18
 n-classes = 2
-mlp-width = "256,256,128,64"
+mlp-widths = "256,256,128,64"
 mlp-dropout = 0.2
 mlp-weight-decay = 1e-4
+mlp-lr-max = 1e-3
+mlp-lr-min = 1e-4
 batch-size = 128
-lr-max = 1e-3
-lr-min = 1e-4
-
 
 # Default federation to use when running the app
 [tool.flwr.federations]

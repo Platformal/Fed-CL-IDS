@@ -12,41 +12,35 @@ app = ServerApp()
 
 @app.main()
 def main(grid: Grid, context: Context) -> None:
-    # Get configurations
-    fraction_train = float(context.run_config['fraction-train'])
-    fraction_eval = float(context.run_config['fraction-evaluate'])
-
     # Create and initialize central model to none.
-    model_width = str(context.run_config['mlp-width'])
-    central_model = MLP(
+    model_width = str(context.run_config['mlp-widths'])
+    initial_model = MLP(
         n_features=int(context.run_config['n-features']),
         n_classes=int(context.run_config['n-classes']),
         hidden_widths=[int(x) for x in model_width.split(',')],
         dropout=float(context.run_config['mlp-dropout']),
         weight_decay=float(context.run_config['mlp-weight-decay']),
-        lr_max=float(context.run_config['lr-max']),
-        lr_min=float(context.run_config['lr-min'])
+        lr_max=float(context.run_config['mlp-lr-max']),
+        lr_min=float(context.run_config['mlp-lr-min'])
     )
-    device = torch.device('cuda:0' if torch.cuda.is_available() else 'cpu')
-    central_model.to(device)
-
     total_clients = len(list(grid.get_node_ids()))
+    fraction_train = float(context.run_config['fraction-train'])
+    fraction_eval = float(context.run_config['fraction-evaluate'])
     n_train_clients = int(total_clients * fraction_train)
 
     # Range of days with list of flows for the day
     max_days = int(context.run_config['max-days'])
-    uavids_days = yaml.safe_load(open("fed_cl_ids/data_pipeline/splits/uavids_days.yaml"))
+    path = "fed_cl_ids/data_pipeline/splits/uavids_days.yaml"
+    uavids_days: dict = yaml.safe_load(open(path))
     uavids_days = dict(list(uavids_days.items())[:max_days])
     
     # Sampled clients are static and won't change throughout days.
     # Strategy needs to be in loop. Reassigns sampled clients if need be.
     strategy = UAVIDSFedAvg(fraction_train, fraction_eval)
 
-    initial_model = ArrayRecord(central_model.state_dict())
-    current_model: ArrayRecord = initial_model
+    current_model = ArrayRecord(initial_model.state_dict())
     for day in range(1, max_days + 1):
         # Assign each flow to available clients for given day
-        # Deterministic
         client_map = [[] for _ in range(n_train_clients)]
         for flow_id in uavids_days[f'Day{day}']:
             id_encoding = str(flow_id).encode()
