@@ -1,12 +1,16 @@
+from flwr.app import ArrayRecord, Context, Message, MetricRecord, RecordDict
+from flwr.clientapp import ClientApp
+
 from fed_cl_ids.models.losses import Losses
 from fed_cl_ids.models.mlp import MLP
 from sklearn.model_selection import train_test_split
-from flwr.app import ArrayRecord, Context, Message, MetricRecord, RecordDict
-from flwr.clientapp import ClientApp
+
 from torch.utils.data import DataLoader, TensorDataset
-from torch.nn import BCEWithLogitsLoss
 from torch import Tensor
 import torch
+
+from typing import Callable
+from pprint import pprint
 import pandas as pd
 import numpy as np
 import random
@@ -16,9 +20,9 @@ app = ClientApp()
 
 class Client:
     def __init__(self) -> None:
-        self.dataframe: pd.DataFrame = None
+        self.dataframe: pd.DataFrame
         self.model: MLP
-        self.criterion = BCEWithLogitsLoss()
+        self.criterion = torch.nn.BCEWithLogitsLoss()
         self._has_context: bool = False
 
         # toml configurables
@@ -30,7 +34,7 @@ class Client:
         self.batch_size: int
 
         # Continual learning attributes
-        self.total_flows: int = 0
+        self.total_flows: int = int()
         self.replay_buffer: list[tuple[Tensor, Tensor]] = []
         self.prev_parameters: dict[str, Tensor] = {}
         self.fisher_diagonal: dict[str, Tensor] = {}
@@ -54,7 +58,7 @@ class Client:
         self.model.load_state_dict(new_model_params)
     
     def set_dataframe(self, path_to_csv: str) -> None:
-        if self.dataframe is not None:
+        if hasattr(self, 'dataframe'):
             return
         self.dataframe = pd.read_csv(path_to_csv).set_index('FlowID')
 
@@ -156,9 +160,9 @@ class Client:
             return avg_loss
 
         self.total_flows += n_new_samples
-        sampler = [(feature, label) 
+        sampler = ((feature, label) 
                 for feature, label in zip(*train_set)
-                if random.random() < self.er_sample_rate]
+                if random.random() <= self.er_sample_rate)
         self.replay_buffer.extend(sampler)
 
         self.fisher_diagonal = self._fisher_information(train_set)
@@ -241,25 +245,39 @@ class Client:
         }
         return metrics
     
-def assign_context(client_function):
+def assign_context(function: Callable):
     def wrapper(msg: Message, context: Context) -> Message:
-        if not client._has_context:
-            client._initialize_model(context)
-            client.epochs = int(context.run_config['epochs'])
-            client.cl_enabled = bool(context.run_config['cl-enabled'])
-            client.ewc_half_lambda = float(context.run_config['ewc-lambda']) / 2
-            client.er_sample_rate = float(context.run_config['er-memory'])
-            client.er_priority = float(context.run_config['er-alpha'])
-            client.batch_size = int(context.run_config['batch-size'])
-            client._has_context = True
-        return client_function(msg)
+        client = Client()
+        client._initialize_model(context)
+        client.epochs = int(context.run_config['epochs'])
+        client.cl_enabled = bool(context.run_config['cl-enabled'])
+        client.ewc_half_lambda = float(context.run_config['ewc-lambda']) / 2
+        client.er_sample_rate = float(context.run_config['er-memory'])
+        client.er_priority = float(context.run_config['er-alpha'])
+        client.batch_size = int(context.run_config['batch-size'])
+        client._has_context = True
+        
+        if function.__name__ == "client_train" and hasattr(context, '_cl'):
+            client.total_flows =  context._cl['total_flows']
+            client.replay_buffer = context._cl['replay_buffer']
+            client.prev_parameters = context._cl['prev_parameters']
+            client.fisher_diagonal = context._cl['fisher_diagonal']
+
+        client_results: Message = function(client, msg)
+
+        if function.__name__ == "client_train":
+            context._cl = {
+            'total_flows': client.total_flows,
+            'replay_buffer': client.replay_buffer,
+            'prev_parameters': client.prev_parameters,
+            'fisher_diagonal': client.fisher_diagonal
+        }
+        return client_results
     return wrapper
-    
-client = Client()
 
 @app.train()
 @assign_context
-def new_train(msg: Message) -> Message:
+def client_train(client: Client, msg: Message) -> Message:
     client.update_model(msg)
     client.set_dataframe("fed_cl_ids/datasets/UAVIDS-2025 Preprocessed.csv")
     flow_ids: list[int] = msg.content['config']['flows']
@@ -280,7 +298,7 @@ def new_train(msg: Message) -> Message:
 
 @app.evaluate()
 @assign_context
-def new_evaluate(msg: Message) -> Message:
+def client_evaluate(client: Client, msg: Message) -> Message:
     client.update_model(msg)
     client.set_dataframe("fed_cl_ids/datasets/UAVIDS-2025 Preprocessed.csv")
     flow_ids: list[int] = msg.content['config']['flows']

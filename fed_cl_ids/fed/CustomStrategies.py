@@ -1,5 +1,7 @@
-from flwr.common import ArrayRecord, ConfigRecord, Message, MetricRecord, log
+from flwr.common import ArrayRecord, ConfigRecord, MetricRecord
+from flwr.common import RecordDict, Message, MessageType, log
 from flwr.serverapp.strategy import FedAvg, Result
+from flwr.serverapp.strategy.strategy_utils import sample_nodes
 from flwr.server import Grid
 from logging import INFO
 from collections.abc import Iterable
@@ -19,7 +21,7 @@ def str_config(config: ConfigRecord) -> str:
         if isinstance(value, bytes):
             string = f"'{key}': '<bytes>'"
         elif isinstance(value, list):
-            string = f"'{key}': length={len(value)}"
+            string = f"'{key}': length = {len(value)}"
         else:
             string = f"'{key}': '{value}'"
         all_config_str.append(string)
@@ -53,9 +55,36 @@ def log_strategy_start_info(
 class UAVIDSFedAvg(FedAvg):
     def __init__(self, fraction_train, fraction_eval) -> None:
         super().__init__(fraction_train, fraction_eval)
+        self.train_node_ids: list[int] = []
+        self.evaluate_node_ids: list[int] = []
+        self.all_node_ids: list[int] = []
     
-    def configure_train(self, server_round: int, arrays: ArrayRecord, config: ConfigRecord, grid: Grid) -> Iterable[Message]:
-        messages = super().configure_train(server_round, arrays, config, grid)
+    # Changed sample_nodes function only to initialize
+    def configure_train(
+        self, server_round: int, arrays: ArrayRecord, 
+        config: ConfigRecord, grid: Grid) -> Iterable[Message]:
+        '''Configure the next round of federated training.'''
+        if self.fraction_train == 0.0:
+            return []
+        if not self.train_node_ids:
+            num_nodes = int(len(list(grid.get_node_ids())) * self.fraction_train)
+            sample_size = max(num_nodes, self.min_train_nodes)
+            node_ids, num_total = sample_nodes(grid, self.min_available_nodes, sample_size)
+            self.all_node_ids = num_total
+            self.train_node_ids = node_ids
+        log(
+            INFO,
+            f"configure_train: Sampled {len(self.train_node_ids)} nodes "
+            f"(out of {len(self.all_node_ids)})"
+        )
+        config['server-round'] = server_round
+
+        record = RecordDict({
+            self.arrayrecord_key: arrays, 
+            self.configrecord_key: config
+        })
+        messages = self._construct_messages(record, self.train_node_ids, MessageType.TRAIN)
+        # Assign flows to messages
         flows: list[list[int]] = json.loads(config['flows'])
         for i, message in enumerate(messages):
             client_content = message.content.copy()
@@ -63,10 +92,33 @@ class UAVIDSFedAvg(FedAvg):
             client_content['config']['flows'] = flows[i]
             message.content = client_content
         return messages
-    
-    def configure_evaluate(self, server_round: int, arrays: ArrayRecord, 
-                           config: ConfigRecord, grid: Grid) -> Iterable[Message]:
-        messages = super().configure_evaluate(server_round, arrays, config, grid)
+
+    def configure_evaluate(
+        self, server_round: int, arrays: ArrayRecord, config: ConfigRecord, grid: Grid
+    ) -> Iterable[Message]:
+        '''Configure the next round of federated evaluation.'''
+        if self.fraction_evaluate == 0.0:
+            return []
+
+        if not self.evaluate_node_ids:
+            num_nodes = int(len(list(grid.get_node_ids())) * self.fraction_evaluate)
+            sample_size = max(num_nodes, self.min_evaluate_nodes)
+            node_ids, _ = sample_nodes(grid, self.min_available_nodes, sample_size)
+            self.evaluate_node_ids = node_ids
+        log(
+            INFO,
+            f"configure_evaluate: Sampled {len(self.evaluate_node_ids)} nodes "
+            f"(out of {len(self.all_node_ids)})",
+        )
+
+        # Always inject current server round
+        config["server-round"] = server_round
+
+        # Construct messages
+        record = RecordDict(
+            {self.arrayrecord_key: arrays, self.configrecord_key: config}
+        )
+        messages = self._construct_messages(record, self.evaluate_node_ids, MessageType.EVALUATE)
         flows: list[list[int]] = json.loads(config['flows'])
         for i, message in enumerate(messages):
             client_content = message.content.copy()
@@ -74,7 +126,7 @@ class UAVIDSFedAvg(FedAvg):
             client_content['config']['flows'] = flows[i]
             message.content = client_content
         return messages
-    
+
     def start(
         self,
         grid: Grid,
@@ -159,7 +211,7 @@ class UAVIDSFedAvg(FedAvg):
                     train_config,
                     grid,
                 ),
-                timeout=timeout,
+                timeout=timeout
             )
 
             # Aggregate train
@@ -197,7 +249,6 @@ class UAVIDSFedAvg(FedAvg):
                 current_round,
                 evaluate_replies,
             )
-
             # Log training metrics and append to history
             if agg_evaluate_metrics is not None:
                 log(INFO, "\t└──> Aggregated MetricRecord: %s", agg_evaluate_metrics)

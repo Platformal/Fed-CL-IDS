@@ -1,11 +1,14 @@
 from flwr.app import ArrayRecord, ConfigRecord, Context
 from flwr.serverapp import Grid, ServerApp
+
 from fed_cl_ids.fed.CustomStrategies import UAVIDSFedAvg
 from fed_cl_ids.models.mlp import MLP
+
 import torch
 import hashlib
 import json
 import yaml
+import time
 
 # Create ServerApp
 app = ServerApp()
@@ -38,7 +41,6 @@ def main(grid: Grid, context: Context) -> None:
     # Strategy needs to be in loop. Reassigns sampled clients if need be.
     strategy = UAVIDSFedAvg(fraction_train, fraction_eval)
 
-    import time
     start = time.time()
     current_model = ArrayRecord(initial_model.state_dict())
     for day in range(1, max_days + 1):
