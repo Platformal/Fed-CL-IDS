@@ -7,7 +7,6 @@ class MLP(nn.Module):
     def __init__(
             self,
             n_features: int =  0, 
-            n_classes: int = 0, 
             hidden_widths: list[int] = [],
             dropout: float = 0.0, 
             weight_decay: float = 0.0,
@@ -34,8 +33,7 @@ class MLP(nn.Module):
                 nn.Dropout(self.dropout)
             ))
             prev_dimension = width
-        # Final output binary neuron
-        output_layer = nn.Linear(prev_dimension, 1)
+        output_layer = nn.Linear(prev_dimension, 1) # Single neuron output
         layers.append(output_layer)
         return nn.Sequential(*layers)
 

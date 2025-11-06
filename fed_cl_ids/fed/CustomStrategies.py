@@ -13,7 +13,7 @@ import io
 import json
 
 def str_config(config: ConfigRecord) -> str:
-    """Ensures start log does not print all elements in flows."""
+    '''Ensures start log does not print all elements in flows.'''
     all_config_str: list[str] = []
     for key, value in config.items():
         try:

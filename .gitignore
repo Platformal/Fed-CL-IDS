@@ -174,4 +174,4 @@ fed_cl_ids/outputs/Day*.pt
 # vscode
 .vscode
 
-fed_cl_ids/runtime
+fed_cl_ids/runtime/

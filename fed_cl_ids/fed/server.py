@@ -11,16 +11,13 @@ import yaml
 import time
 import os
 
-# Create ServerApp
 app = ServerApp()
 
 @app.main()
 def main(grid: Grid, context: Context) -> None:
-    # Create and initialize central model to none.
     model_width = str(context.run_config['mlp-widths'])
     initial_model = MLP(
         n_features=int(context.run_config['n-features']),
-        n_classes=int(context.run_config['n-classes']),
         hidden_widths=[int(x) for x in model_width.split(',')],
         dropout=float(context.run_config['mlp-dropout']),
         weight_decay=float(context.run_config['mlp-weight-decay']),
@@ -37,18 +34,15 @@ def main(grid: Grid, context: Context) -> None:
     path = "fed_cl_ids/data_pipeline/splits/uavids_days.yaml"
     uavids_days: dict = yaml.safe_load(open(path))
     uavids_days = dict(list(uavids_days.items())[:max_days])
-    
-    # Sampled clients are static and won't change throughout days.
-    # Strategy needs to be in loop. Reassigns sampled clients if need be.
-    strategy = UAVIDSFedAvg(fraction_train, fraction_eval)
 
-    runtime_path = "fed_cl_ids/runtime"
+    runtime_path = os.path.join("fed_cl_ids", "runtime")
     for file_name in os.listdir(runtime_path):
         file_path = os.path.join(runtime_path, file_name)
         os.remove(file_path)
 
-    start = time.time()
+    strategy = UAVIDSFedAvg(fraction_train, fraction_eval)
     current_model = ArrayRecord(initial_model.state_dict())
+    start = time.time()
     for day in range(1, max_days + 1):
         # Assign each flow to available clients for given day
         client_map = [[] for _ in range(n_train_clients)]

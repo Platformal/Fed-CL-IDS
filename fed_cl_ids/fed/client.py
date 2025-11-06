@@ -35,10 +35,8 @@ class Client:
         self.batch_size: int
 
         # Continual learning attributes
-        self.total_flows: int = int()
+        self.total_flows: int = 0
         self.replay_buffer: ReplayBuffer
-        self.replay_features: Tensor = torch.empty((0,))
-        self.replay_labels: Tensor = torch.empty((0,))
         self.prev_parameters: dict[str, Tensor] = {}
         self.fisher_diagonal: dict[str, Tensor] = {}
     
@@ -47,7 +45,6 @@ class Client:
         widths = str(context.run_config['mlp-widths'])
         new_model = MLP(
             n_features=int(context.run_config['n-features']),
-            n_classes=int(context.run_config['n-classes']),
             hidden_widths=[int(x) for x in widths.split(',')],
             dropout=float(context.run_config['mlp-dropout']),
             weight_decay=float(context.run_config['mlp-weight-decay']),
@@ -71,7 +68,6 @@ class Client:
     ) -> tuple[tuple[Tensor, Tensor], tuple[Tensor, Tensor]]:
         '''
         Split client's dataframe into train and test sets.\n
-        ****
         **label_parity**: bool\n
         Whether to distribute multi-class labels evenly.
         '''
@@ -107,11 +103,12 @@ class Client:
 
         if self.cl_enabled:
             true_ratio = (1 - self.er_priority) / self.er_priority
-            replay_sample_size = int(n_new_samples / true_ratio)
+            ideal_sample_size = int(n_new_samples / true_ratio)
 
             # Ratio will be off until replay_buffer size >= replay_sample_size
-            if self.replay_buffer and replay_sample_size:
-                max_samples = min(len(self.replay_buffer), replay_sample_size)
+            replay_buffer_size = len(self.replay_buffer)
+            if replay_buffer_size and ideal_sample_size:
+                max_samples = min(replay_buffer_size, ideal_sample_size)
                 old_features, old_labels = self.replay_buffer.sample(max_samples)
                 train_features = torch.cat((train_features, old_features))
                 train_labels = torch.cat((train_labels, old_labels))
@@ -164,7 +161,9 @@ class Client:
                 if random.random() <= self.er_sample_rate)
         if sampler:
             new_features, new_labels = zip(*sampler)
-            self.replay_buffer.append(torch.stack(new_features), torch.stack(new_labels))
+            new_features = torch.stack(new_features)
+            new_labels = torch.stack(new_labels)
+            self.replay_buffer.append(new_features, new_labels)
 
         self.fisher_diagonal = self._fisher_information(train_set)
         self.prev_parameters = {
@@ -244,35 +243,27 @@ class Client:
             'recall@fpr=1%': Losses.recall_at_fpr(all_labels, all_probabilities, 0.01)
         }
         return metrics
-    
+
+'''Client object needs to be cached or else each round would have to create
+a new client. Context allows persistence for the process to obtain client'''
 def assign_context(function: Callable):
     def wrapper(msg: Message, context: Context) -> Message:
-        client = Client()
-        client._initialize_model(context)
-        client.epochs = int(context.run_config['epochs'])
-        client.cl_enabled = bool(context.run_config['cl-enabled'])
-        client.ewc_half_lambda = float(context.run_config['ewc-lambda']) / 2
-        client.er_sample_rate = float(context.run_config['er-memory'])
-        client.er_priority = float(context.run_config['er-alpha'])
-        client.batch_size = int(context.run_config['batch-size'])
-        n_features = int(context.run_config['n-features'])
-        client.replay_buffer = ReplayBuffer(os.getpid(), n_features)
-        
-        if function.__name__ == "client_train" and hasattr(context, '_cl'):
-            client.total_flows =  context._cl['total_flows']
-            client.replay_buffer = context._cl['replay_buffer']
-            client.prev_parameters = context._cl['prev_parameters']
-            client.fisher_diagonal = context._cl['fisher_diagonal']
+        if not hasattr(context, '_client'):
+            client = Client()
+            client._initialize_model(context)
+            client.epochs = int(context.run_config['epochs'])
+            client.cl_enabled = bool(context.run_config['cl-enabled'])
+            client.ewc_half_lambda = float(context.run_config['ewc-lambda']) / 2
+            client.er_sample_rate = float(context.run_config['er-memory'])
+            client.er_priority = float(context.run_config['er-alpha'])
+            client.batch_size = int(context.run_config['batch-size'])
+            n_features = int(context.run_config['n-features'])
+            client.replay_buffer = ReplayBuffer(os.getpid(), n_features)
+            context._client = client
+        else:
+            client: Client = context._client
 
         client_results: Message = function(client, msg)
-
-        if function.__name__ == "client_train":
-            context._cl = {
-            'total_flows': client.total_flows,
-            'replay_buffer': client.replay_buffer,
-            'prev_parameters': client.prev_parameters,
-            'fisher_diagonal': client.fisher_diagonal
-        }
         return client_results
     return wrapper
 
