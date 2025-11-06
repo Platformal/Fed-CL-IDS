@@ -1,7 +1,6 @@
-from torch import Tensor
-import torch.nn as nn
-from torch.optim.adam import Adam
 from torch.optim.lr_scheduler import CosineAnnealingLR
+from torch.optim.adam import Adam
+from torch import nn, Tensor
 
 class MLP(nn.Module):
     # Values should be initialized by the server and passed onto clients
@@ -9,7 +8,7 @@ class MLP(nn.Module):
             self,
             n_features: int =  0, 
             n_classes: int = 0, 
-            hidden_widths: list[int] = [], 
+            hidden_widths: list[int] = [],
             dropout: float = 0.0, 
             weight_decay: float = 0.0,
             lr_max: float = 0.0, 
@@ -17,7 +16,6 @@ class MLP(nn.Module):
 
         super().__init__()
         self.n_features = n_features
-        self.n_classes = n_classes
         self.hidden_widths = hidden_widths
         self.dropout = dropout
         self.weight_decay = weight_decay
@@ -36,12 +34,13 @@ class MLP(nn.Module):
                 nn.Dropout(self.dropout)
             ))
             prev_dimension = width
-        output_layer = nn.Linear(prev_dimension, 1) # Final output, binary
+        # Final output binary neuron
+        output_layer = nn.Linear(prev_dimension, 1)
         layers.append(output_layer)
         return nn.Sequential(*layers)
 
-    def forward(self, x: Tensor) -> Tensor:
-        return self.network(x)
+    def forward(self, features: Tensor) -> Tensor:
+        return self.network(features)
 
     def get_optimizer(self, n_iterations: int) -> tuple[Adam, CosineAnnealingLR]:
         optimizer = Adam(

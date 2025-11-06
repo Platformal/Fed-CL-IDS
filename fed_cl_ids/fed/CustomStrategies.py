@@ -1,11 +1,13 @@
 from flwr.common import ArrayRecord, ConfigRecord, MetricRecord
 from flwr.common import RecordDict, Message, MessageType, log
-from flwr.serverapp.strategy import FedAvg, Result
 from flwr.serverapp.strategy.strategy_utils import sample_nodes
+from flwr.serverapp.strategy import FedAvg, Result
 from flwr.server import Grid
 from logging import INFO
+
 from collections.abc import Iterable
 from typing import Callable, Optional
+
 import time
 import io
 import json
@@ -196,7 +198,7 @@ class UAVIDSFedAvg(FedAvg):
         current_array = initial_arrays
         for current_round in range(1, num_rounds + 1):
             log(INFO, "")
-            log(INFO, "[Day %s | ROUND %s/%s]", current_day, current_round, num_rounds)
+            log(INFO, "[DAY %s | ROUND %s/%s]", current_day, current_round, num_rounds)
             
             # -----------------------------------------------------------------
             # --- TRAINING (CLIENTAPP-SIDE) -----------------------------------

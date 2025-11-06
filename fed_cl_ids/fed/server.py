@@ -9,6 +9,7 @@ import hashlib
 import json
 import yaml
 import time
+import os
 
 # Create ServerApp
 app = ServerApp()
@@ -40,6 +41,11 @@ def main(grid: Grid, context: Context) -> None:
     # Sampled clients are static and won't change throughout days.
     # Strategy needs to be in loop. Reassigns sampled clients if need be.
     strategy = UAVIDSFedAvg(fraction_train, fraction_eval)
+
+    runtime_path = "fed_cl_ids/runtime"
+    for file_name in os.listdir(runtime_path):
+        file_path = os.path.join(runtime_path, file_name)
+        os.remove(file_path)
 
     start = time.time()
     current_model = ArrayRecord(initial_model.state_dict())

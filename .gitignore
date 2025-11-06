@@ -168,8 +168,10 @@ fed_cl_ids/datasets/CIC-IDS2017/
 # temp
 tempCodeRunnerFile.python
 
-# Models
-final_model.pt
-
 # Day Outputs
 fed_cl_ids/outputs/Day*.pt
+
+# vscode
+.vscode
+
+fed_cl_ids/runtime

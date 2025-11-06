@@ -1,9 +1,10 @@
 from flwr.app import ArrayRecord, Context, Message, MetricRecord, RecordDict
 from flwr.clientapp import ClientApp
 
-from fed_cl_ids.models.losses import Losses
-from fed_cl_ids.models.mlp import MLP
 from sklearn.model_selection import train_test_split
+from fed_cl_ids.models.losses import Losses
+from fed_cl_ids.fed.replaybuffer import ReplayBuffer
+from fed_cl_ids.models.mlp import MLP
 
 from torch.utils.data import DataLoader, TensorDataset
 from torch import Tensor
@@ -14,6 +15,7 @@ from pprint import pprint
 import pandas as pd
 import numpy as np
 import random
+import os
 
 # Flower ClientApp
 app = ClientApp()
@@ -23,7 +25,6 @@ class Client:
         self.dataframe: pd.DataFrame
         self.model: MLP
         self.criterion = torch.nn.BCEWithLogitsLoss()
-        self._has_context: bool = False
 
         # toml configurables
         self.epochs: int
@@ -35,7 +36,9 @@ class Client:
 
         # Continual learning attributes
         self.total_flows: int = int()
-        self.replay_buffer: list[tuple[Tensor, Tensor]] = []
+        self.replay_buffer: ReplayBuffer
+        self.replay_features: Tensor = torch.empty((0,))
+        self.replay_labels: Tensor = torch.empty((0,))
         self.prev_parameters: dict[str, Tensor] = {}
         self.fisher_diagonal: dict[str, Tensor] = {}
     
@@ -108,12 +111,8 @@ class Client:
 
             # Ratio will be off until replay_buffer size >= replay_sample_size
             if self.replay_buffer and replay_sample_size:
-                samples = random.sample(
-                    population=self.replay_buffer, 
-                    k=min(replay_sample_size, len(self.replay_buffer))
-                )
-                old_features = torch.stack([feature for feature, _ in samples])
-                old_labels = torch.stack([label for _, label in samples])
+                max_samples = min(len(self.replay_buffer), replay_sample_size)
+                old_features, old_labels = self.replay_buffer.sample(max_samples)
                 train_features = torch.cat((train_features, old_features))
                 train_labels = torch.cat((train_labels, old_labels))
 
@@ -163,7 +162,9 @@ class Client:
         sampler = ((feature, label) 
                 for feature, label in zip(*train_set)
                 if random.random() <= self.er_sample_rate)
-        self.replay_buffer.extend(sampler)
+        if sampler:
+            new_features, new_labels = zip(*sampler)
+            self.replay_buffer.append(torch.stack(new_features), torch.stack(new_labels))
 
         self.fisher_diagonal = self._fisher_information(train_set)
         self.prev_parameters = {
@@ -173,8 +174,7 @@ class Client:
         }
         return avg_loss
     
-    def _fisher_information(
-            self, train_set: tuple[Tensor, Tensor]) -> dict[str, Tensor]:
+    def _fisher_information(self, train_set: tuple[Tensor, Tensor]) -> dict[str, Tensor]:
         self.model.eval()
         fisher: dict[str, Tensor] = {
             name: torch.zeros_like(parameter)
@@ -255,7 +255,8 @@ def assign_context(function: Callable):
         client.er_sample_rate = float(context.run_config['er-memory'])
         client.er_priority = float(context.run_config['er-alpha'])
         client.batch_size = int(context.run_config['batch-size'])
-        client._has_context = True
+        n_features = int(context.run_config['n-features'])
+        client.replay_buffer = ReplayBuffer(os.getpid(), n_features)
         
         if function.__name__ == "client_train" and hasattr(context, '_cl'):
             client.total_flows =  context._cl['total_flows']
