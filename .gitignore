@@ -175,3 +175,5 @@ fed_cl_ids/outputs/Day*.pt
 .vscode
 
 fed_cl_ids/runtime/
+
+test.py

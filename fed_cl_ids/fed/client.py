@@ -66,12 +66,10 @@ class Client:
             self, flow_ids: list[int], train_ratio: float = 0.8, 
             random_seed: int = 42, label_parity: bool = True
     ) -> tuple[tuple[Tensor, Tensor], tuple[Tensor, Tensor]]:
-        '''
-        Split client's dataframe into train and test sets.\n
+        '''Split client's dataframe into train and test sets.\n
         **label_parity**: bool\n
-        Whether to distribute multi-class labels evenly.
-        '''
-        if self.dataframe is None:
+        Whether to distribute multi-class labels evenly.'''
+        if not hasattr(self, 'dataframe'):
             raise ValueError("Dataframe was not initialized")
         filtered = self.dataframe.loc[flow_ids]
         features, labels = filtered.drop('label', axis=1), filtered['label']
