@@ -6,9 +6,10 @@ import os
 class ReplayBuffer:
     '''Maps the replay buffer to disk.
     The runtime folder should be cleared every run'''
-    def __init__(self, identifier: int | str, 
-                 n_features: int, 
-                 path: str = os.path.join("fed_cl_ids", "runtime")) -> None:
+    def __init__(
+            self, identifier: int | str, 
+            n_features: int,
+            path: str = os.path.join("fed_cl_ids", "runtime")) -> None:
         self._n_features = n_features
         self._length: int = 0
         

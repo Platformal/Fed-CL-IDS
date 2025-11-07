@@ -1,7 +1,6 @@
 from flwr.app import ArrayRecord, Context, Message, MetricRecord, RecordDict
 from flwr.clientapp import ClientApp
 
-from sklearn.model_selection import train_test_split
 from fed_cl_ids.models.losses import Losses
 from fed_cl_ids.fed.replaybuffer import ReplayBuffer
 from fed_cl_ids.models.mlp import MLP
@@ -17,21 +16,19 @@ import numpy as np
 import random
 import os
 
-# Flower ClientApp
-app = ClientApp()
-
 class Client:
     def __init__(self) -> None:
-        self.dataframe: pd.DataFrame
         self.model: MLP
         self.criterion = torch.nn.BCEWithLogitsLoss()
+        self.dataframe: pd.DataFrame
+        self.dataframe_path: str
 
         # toml configurables
         self.epochs: int
         self.cl_enabled: bool
         self.ewc_half_lambda: float
         self.er_sample_rate: float
-        self.er_priority: float
+        self.er_mix_ratio: float
         self.batch_size: int
 
         # Continual learning attributes
@@ -43,7 +40,7 @@ class Client:
     # Remove n_classes
     def _initialize_model(self, context: Context) -> None:
         widths = str(context.run_config['mlp-widths'])
-        new_model = MLP(
+        self.model = MLP(
             n_features=int(context.run_config['n-features']),
             hidden_widths=[int(x) for x in widths.split(',')],
             dropout=float(context.run_config['mlp-dropout']),
@@ -51,67 +48,46 @@ class Client:
             lr_max=float(context.run_config['mlp-lr-max']),
             lr_min=float(context.run_config['mlp-lr-min'])
         )
-        self.model = new_model
 
-    def update_model(self, msg: Message) -> None:
-        new_model_params = msg.content['arrays'].to_torch_state_dict()
-        self.model.load_state_dict(new_model_params)
+    def update_model(self, parameters: dict[str, Tensor]) -> None:
+        self.model.load_state_dict(parameters)
     
-    def set_dataframe(self, path_to_csv: str) -> None:
-        if hasattr(self, 'dataframe'):
+    def set_dataframe(self, csv_path: str) -> None:
+        if hasattr(self, 'dataframe_path') and self.dataframe_path == csv_path:
             return
-        self.dataframe = pd.read_csv(path_to_csv).set_index('FlowID')
+        self.dataframe = pd.read_csv(csv_path).set_index('FlowID')
+        self.dataframe_path = csv_path
 
-    def train_test_split(
-            self, flow_ids: list[int], train_ratio: float = 0.8, 
-            random_seed: int = 42, label_parity: bool = True
-    ) -> tuple[tuple[Tensor, Tensor], tuple[Tensor, Tensor]]:
-        '''Split client's dataframe into train and test sets.\n
-        **label_parity**: bool\n
-        Whether to distribute multi-class labels evenly.'''
+    def get_flow_data(self, flow_ids: list[int]) -> tuple[Tensor, Tensor]:
         if not hasattr(self, 'dataframe'):
             raise ValueError("Dataframe was not initialized")
         filtered = self.dataframe.loc[flow_ids]
         features, labels = filtered.drop('label', axis=1), filtered['label']
-        features_np = features.to_numpy('float32')
-        labels_np = labels.to_numpy('uint8')
+        np_features = features.to_numpy('float32')
+        np_labels = labels.to_numpy('uint8')
         
-        splits = train_test_split(
-            features_np, labels_np,
-            train_size=train_ratio,
-            stratify=labels_np if label_parity else None,
-            random_state=random_seed
-        )
-        train_features, test_features, train_labels, test_labels = splits
-
         # bool() to binarize and float() since BCELoss is a probability [0,1]
         # This is assuming label 0 is normal/benign traffic
-        train_labels = torch.from_numpy(train_labels).bool().float()
-        test_labels = torch.from_numpy(test_labels).bool().float()
-        train_features = torch.from_numpy(train_features)
-        test_features = torch.from_numpy(test_features)
-    
-        train_set = (train_features, train_labels)
-        test_set = (test_features, test_labels)
-        return train_set, test_set
+        tensor_features = torch.from_numpy(np_features)
+        tensor_labels = torch.from_numpy(np_labels).bool().float()
+        return tensor_features, tensor_labels
 
     def train(self, train_set: tuple[Tensor, Tensor]) -> float:
         train_features, train_labels = train_set
         n_new_samples = len(train_labels)
 
         if self.cl_enabled:
-            true_ratio = (1 - self.er_priority) / self.er_priority
+            true_ratio = (1 - self.er_mix_ratio) / self.er_mix_ratio
             ideal_sample_size = int(n_new_samples / true_ratio)
 
             # Ratio will be off until replay_buffer size >= replay_sample_size
-            replay_buffer_size = len(self.replay_buffer)
-            if replay_buffer_size and ideal_sample_size:
-                max_samples = min(replay_buffer_size, ideal_sample_size)
-                old_features, old_labels = self.replay_buffer.sample(max_samples)
+            if self.replay_buffer and ideal_sample_size:
+                actual_samples = min(len(self.replay_buffer), ideal_sample_size)
+                samples = self.replay_buffer.sample(actual_samples)
+                old_features, old_labels = samples
                 train_features = torch.cat((train_features, old_features))
                 train_labels = torch.cat((train_labels, old_labels))
 
-        total_samples = len(train_labels)
         data = TensorDataset(train_features, train_labels)
         batches = DataLoader(data, batch_size=self.batch_size, shuffle=True)
 
@@ -149,14 +125,15 @@ class Client:
                 scheduler.step() # Adjust learning rate
                 optimizer.zero_grad() # Reset for next batch
                 running_loss += loss.item() * batch_labels.size(0)
+        total_samples = len(train_labels)
         avg_loss = running_loss / total_samples
         if not self.cl_enabled:
             return avg_loss
 
         self.total_flows += n_new_samples
-        sampler = ((feature, label) 
+        sampler = [(feature, label) 
                 for feature, label in zip(*train_set)
-                if random.random() <= self.er_sample_rate)
+                if random.random() <= self.er_sample_rate]
         if sampler:
             new_features, new_labels = zip(*sampler)
             new_features = torch.stack(new_features)
@@ -253,7 +230,7 @@ def assign_context(function: Callable):
             client.cl_enabled = bool(context.run_config['cl-enabled'])
             client.ewc_half_lambda = float(context.run_config['ewc-lambda']) / 2
             client.er_sample_rate = float(context.run_config['er-memory'])
-            client.er_priority = float(context.run_config['er-alpha'])
+            client.er_mix_ratio = float(context.run_config['er-alpha'])
             client.batch_size = int(context.run_config['batch-size'])
             n_features = int(context.run_config['n-features'])
             client.replay_buffer = ReplayBuffer(os.getpid(), n_features)
@@ -265,13 +242,16 @@ def assign_context(function: Callable):
         return client_results
     return wrapper
 
+app = ClientApp()
+
 @app.train()
 @assign_context
 def client_train(client: Client, msg: Message) -> Message:
-    client.update_model(msg)
+    new_parameters = msg.content['arrays'].to_torch_state_dict()
+    client.update_model(new_parameters)
     client.set_dataframe("fed_cl_ids/datasets/UAVIDS-2025 Preprocessed.csv")
     flow_ids: list[int] = msg.content['config']['flows']
-    train_set, _ = client.train_test_split(flow_ids)
+    train_set = client.get_flow_data(flow_ids)
 
     average_loss = client.train(train_set)
     client_model_params = ArrayRecord(client.model.state_dict())
@@ -289,10 +269,11 @@ def client_train(client: Client, msg: Message) -> Message:
 @app.evaluate()
 @assign_context
 def client_evaluate(client: Client, msg: Message) -> Message:
-    client.update_model(msg)
+    new_parameters = msg.content['arrays'].to_torch_state_dict()
+    client.update_model(new_parameters)
     client.set_dataframe("fed_cl_ids/datasets/UAVIDS-2025 Preprocessed.csv")
     flow_ids: list[int] = msg.content['config']['flows']
-    _, test_set = client.train_test_split(flow_ids)
+    test_set = client.get_flow_data(flow_ids)
 
     metrics = client.evaluate(test_set)
     metrics['num-examples'] = len(test_set[1])

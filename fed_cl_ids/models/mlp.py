@@ -11,8 +11,8 @@ class MLP(nn.Module):
             dropout: float = 0.0, 
             weight_decay: float = 0.0,
             lr_max: float = 0.0, 
-            lr_min: float = 0.0) -> None:
-
+            lr_min: float = 0.0
+        ) -> None:
         super().__init__()
         self.n_features = n_features
         self.hidden_widths = hidden_widths
@@ -21,21 +21,6 @@ class MLP(nn.Module):
         self.lr_max = lr_max
         self.lr_min = lr_min
         self.network = self._create_network()
-
-    def _create_network(self) -> nn.Sequential:
-        layers = []
-        prev_dimension = self.n_features # Input dimensions
-        for width in self.hidden_widths:
-            layer = nn.Linear(prev_dimension, width)
-            layers.extend((
-                layer,
-                nn.ReLU(),
-                nn.Dropout(self.dropout)
-            ))
-            prev_dimension = width
-        output_layer = nn.Linear(prev_dimension, 1) # Single neuron output
-        layers.append(output_layer)
-        return nn.Sequential(*layers)
 
     def forward(self, features: Tensor) -> Tensor:
         return self.network(features)
@@ -52,3 +37,18 @@ class MLP(nn.Module):
             T_max=n_iterations
         )
         return optimizer, scheduler
+
+    def _create_network(self) -> nn.Sequential:
+        layers = []
+        prev_dimension = self.n_features # Input dimensions
+        for width in self.hidden_widths:
+            layer = nn.Linear(prev_dimension, width)
+            layers.extend((
+                layer,
+                nn.ReLU(),
+                nn.Dropout(self.dropout)
+            ))
+            prev_dimension = width
+        output_layer = nn.Linear(prev_dimension, 1) # Single neuron output
+        layers.append(output_layer)
+        return nn.Sequential(*layers)
