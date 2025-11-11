@@ -15,6 +15,8 @@ import yaml
 import time
 import os
 
+# Run on GPU for speed 95% AUC recovery
+
 class Server:
     def __init__(self, grid: Grid, context: Context) -> None:
         self.fraction_train = float(context.run_config['fraction-train'])
@@ -32,7 +34,7 @@ class Server:
         self.current_parameters = self._model_initial_parameters(context)
 
         self.dataframe: pd.DataFrame
-        self.dataframe_path: Optional[str] = ''
+        self.dataframe_path: str = ''
 
     def _model_initial_parameters(self, context: Context) -> dict[str, Tensor]:
         widths = str(context.run_config['mlp-widths'])
@@ -56,6 +58,7 @@ class Server:
         labels: Optional[pd.Series] = None
         if csv_path:
             if not hasattr(self, 'dataframe') or self.dataframe_path != csv_path:
+                # read_csv(index_col, usecols)
                 self.dataframe = pd.read_csv(csv_path, dtype={'label': 'uint8'})
                 self.dataframe = self.dataframe.set_index('FlowID')
                 self.dataframe_path = csv_path

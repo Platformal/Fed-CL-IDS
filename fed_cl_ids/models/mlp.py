@@ -42,13 +42,13 @@ class MLP(nn.Module):
         layers = []
         prev_dimension = self.n_features # Input dimensions
         for width in self.hidden_widths:
-            layer = nn.Linear(prev_dimension, width)
             layers.extend((
-                layer,
+                nn.Linear(prev_dimension, width), # Main layer
+                nn.LayerNorm(width),
                 nn.ReLU(),
                 nn.Dropout(self.dropout)
             ))
             prev_dimension = width
-        output_layer = nn.Linear(prev_dimension, 1) # Single neuron output
+        output_layer = nn.Linear(prev_dimension, 1) # Final neuron output
         layers.append(output_layer)
         return nn.Sequential(*layers)

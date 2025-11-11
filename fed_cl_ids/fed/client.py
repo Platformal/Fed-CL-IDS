@@ -55,6 +55,7 @@ class Client:
     def set_dataframe(self, csv_path: str) -> None:
         if hasattr(self, 'dataframe_path') and self.dataframe_path == csv_path:
             return
+        # read_csv(index_col)
         self.dataframe = pd.read_csv(csv_path).set_index('FlowID')
         self.dataframe_path = csv_path
 
@@ -237,9 +238,8 @@ def assign_context(function: Callable):
             context._client = client
         else:
             client: Client = context._client
-
-        client_results: Message = function(client, msg)
-        return client_results
+        client_result: Message = function(client, msg)
+        return client_result
     return wrapper
 
 app = ClientApp()
