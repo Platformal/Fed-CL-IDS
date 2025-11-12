@@ -5,26 +5,35 @@ from fed_cl_ids.models.losses import Losses
 from fed_cl_ids.fed.replaybuffer import ReplayBuffer
 from fed_cl_ids.models.mlp import MLP
 
+from opacus import PrivacyEngine
 from torch.utils.data import DataLoader, TensorDataset
 from torch import Tensor
 import torch
 
-from typing import Callable
+from typing import Callable, Optional
 from pprint import pprint
+from time import time
 import pandas as pd
 import numpy as np
+import warnings
+import logging
 import random
 import os
+
+# Privacy Engine
+warnings.filterwarnings("ignore")
 
 class Client:
     def __init__(self) -> None:
         self.model: MLP
         self.criterion = torch.nn.BCEWithLogitsLoss()
         self.dataframe: pd.DataFrame
-        self.dataframe_path: str
+        self.dataframe_path: str = ''
+        self.context: Context
 
         # toml configurables
         self.epochs: int
+        self.dp_enabled: bool
         self.cl_enabled: bool
         self.ewc_half_lambda: float
         self.er_sample_rate: float
@@ -36,8 +45,11 @@ class Client:
         self.replay_buffer: ReplayBuffer
         self.prev_parameters: dict[str, Tensor] = {}
         self.fisher_diagonal: dict[str, Tensor] = {}
+
+        # Differential privacy attributes
+        self.stored_epsilon: Optional[float] = None
+        self.privacy_engine = PrivacyEngine(accountant='rdp')
     
-    # Remove n_classes
     def _initialize_model(self, context: Context) -> None:
         widths = str(context.run_config['mlp-widths'])
         self.model = MLP(
@@ -53,10 +65,9 @@ class Client:
         self.model.load_state_dict(parameters)
     
     def set_dataframe(self, csv_path: str) -> None:
-        if hasattr(self, 'dataframe_path') and self.dataframe_path == csv_path:
+        if self.dataframe_path and self.dataframe_path == csv_path:
             return
-        # read_csv(index_col)
-        self.dataframe = pd.read_csv(csv_path).set_index('FlowID')
+        self.dataframe = pd.read_csv(csv_path, index_col='FlowID')
         self.dataframe_path = csv_path
 
     def get_flow_data(self, flow_ids: list[int]) -> tuple[Tensor, Tensor]:
@@ -74,6 +85,7 @@ class Client:
         return tensor_features, tensor_labels
 
     def train(self, train_set: tuple[Tensor, Tensor]) -> float:
+        self.model.train()
         train_features, train_labels = train_set
         n_new_samples = len(train_labels)
 
@@ -90,29 +102,46 @@ class Client:
                 train_labels = torch.cat((train_labels, old_labels))
 
         data = TensorDataset(train_features, train_labels)
-        batches = DataLoader(data, batch_size=self.batch_size, shuffle=True)
-
+        data_loader = DataLoader(data, batch_size=self.batch_size, shuffle=True)
+        model = self.model
+        
         # Optimizer corresponds per batch, not sample
-        iterations = len(batches) * self.epochs
+        # iterations = len(data_loader) * self.epochs
+        iterations = len(data_loader) * self.epochs # DP 
         optimizer, scheduler = self.model.get_optimizer(iterations)
         running_loss = 0.0
-        self.model.train()
 
+        # Reassign for differential privacy
+        if self.dp_enabled:
+            model, optimizer, *_, data_loader = self.privacy_engine.make_private(
+                module=self.model,
+                optimizer=optimizer,
+                data_loader=data_loader,
+                noise_multiplier=1.0, 
+                max_grad_norm=1.0, # Clipping
+                clipping='flat', # Per layer
+                poisson_sampling=True # DP sampling method
+            )
+            
+        # Training time is around 5 seconds
+        start = time()
         for _ in range(self.epochs):
-            for batch in batches:
-                batch_features, batch_labels = batch
+            for batch in data_loader:
+                if not len(batch):
+                    print("Empty batch")
+                    continue
 
-                outputs: Tensor = self.model(batch_features) # Forward pass
+                batch_features, batch_labels = batch
+                outputs: Tensor = model(batch_features) # Forward pass
                 outputs = outputs.squeeze(1)
                 loss: Tensor = self.criterion(outputs, batch_labels)
 
                 if self.cl_enabled and self.prev_parameters:
                     ewc_loss = 0.0
                     # penalty = (λ/2) * Σ F_i(θ_i - θ*_i)²
-                    for name, parameter in self.model.named_parameters():
-                        # Doesn't catch anything, defined by fisher function
+                    for name, parameter in model.named_parameters():
+                        # Private model has different prev_params
                         if name not in self.prev_parameters:
-                            print(f"{name} not in previous_params")
                             continue
                         f_i = self.fisher_diagonal[name]
                         nested_term = parameter - self.prev_parameters[name]
@@ -126,20 +155,30 @@ class Client:
                 scheduler.step() # Adjust learning rate
                 optimizer.zero_grad() # Reset for next batch
                 running_loss += loss.item() * batch_labels.size(0)
-        total_samples = len(train_labels)
+        print(time() - start)
+
+        if self.dp_enabled:
+            delta = 1e-5
+            epsilon = self.privacy_engine.get_epsilon(delta)
+
+        total_samples = max(1, len(train_labels))
         avg_loss = running_loss / total_samples
         if not self.cl_enabled:
             return avg_loss
 
         self.total_flows += n_new_samples
-        sampler = [(feature, label) 
-                for feature, label in zip(*train_set)
-                if random.random() <= self.er_sample_rate]
+        sampler = tuple((feature, label) 
+                        for feature, label in zip(*train_set)
+                        if random.random() <= self.er_sample_rate)
         if sampler:
             new_features, new_labels = zip(*sampler)
             new_features = torch.stack(new_features)
             new_labels = torch.stack(new_labels)
             self.replay_buffer.append(new_features, new_labels)
+        
+        if self.dp_enabled:
+            self._initialize_model(self.context)
+            self.update_model(model._module.state_dict())
 
         self.fisher_diagonal = self._fisher_information(train_set)
         self.prev_parameters = {
@@ -171,7 +210,7 @@ class Client:
                 for name, parameter in self.model.named_parameters():
                     if parameter.grad is not None:
                         fisher[name] += parameter.grad.detach().pow(2)
-        
+
         # Averaging out after total sum calculated
         n_samples = len(batches)
         for name in fisher:
@@ -179,6 +218,7 @@ class Client:
         return fisher
     
     def evaluate(self, test_set: tuple[Tensor, Tensor]) -> dict[str, float]:
+        self.model.eval()
         test_features, test_labels = test_set
         data = TensorDataset(test_features, test_labels)
         batches = DataLoader(data, batch_size=self.batch_size, shuffle=False)
@@ -186,7 +226,6 @@ class Client:
         all_predictions, all_probabilities =  [], []
         correct = 0
         total_loss = 0.0
-        self.model.eval()
         
         with torch.no_grad():
             for batch in batches:
@@ -226,8 +265,10 @@ def assign_context(function: Callable):
     def wrapper(msg: Message, context: Context) -> Message:
         if not hasattr(context, '_client'):
             client = Client()
+            client.context = context
             client._initialize_model(context)
             client.epochs = int(context.run_config['epochs'])
+            client.dp_enabled = bool(context.run_config['dp-enabled'])
             client.cl_enabled = bool(context.run_config['cl-enabled'])
             client.ewc_half_lambda = float(context.run_config['ewc-lambda']) / 2
             client.er_sample_rate = float(context.run_config['er-memory'])

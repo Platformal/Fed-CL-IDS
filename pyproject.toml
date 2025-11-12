@@ -40,6 +40,7 @@ max-days = 4
 fraction-train = 0.5
 fraction-evaluate = 0.5
 epochs = 2
+dp-enabled = true
 cl-enabled = true
 ewc-lambda = 50
 er-memory = 0.005

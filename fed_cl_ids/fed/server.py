@@ -16,6 +16,8 @@ import time
 import os
 
 # Run on GPU for speed 95% AUC recovery
+# How do I pick the best noise
+# Epsilon increases over rounds right?
 
 class Server:
     def __init__(self, grid: Grid, context: Context) -> None:
@@ -57,11 +59,13 @@ class Server:
         (stratification) to train and test sets'''
         labels: Optional[pd.Series] = None
         if csv_path:
-            if not hasattr(self, 'dataframe') or self.dataframe_path != csv_path:
-                # read_csv(index_col, usecols)
-                self.dataframe = pd.read_csv(csv_path, dtype={'label': 'uint8'})
-                self.dataframe = self.dataframe.set_index('FlowID')
+            if not self.dataframe_path or self.dataframe_path != csv_path:
                 self.dataframe_path = csv_path
+                self.dataframe = pd.read_csv(
+                    filepath_or_buffer=csv_path, 
+                    dtype={'label': 'uint8'},
+                    index_col='FlowID'
+                )
             labels = self.dataframe.loc[raw_flows]['label']
         return train_test_split(
             raw_flows, 
