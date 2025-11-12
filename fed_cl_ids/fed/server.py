@@ -16,8 +16,11 @@ import time
 import os
 
 # Run on GPU for speed 95% AUC recovery
+    # Use ROC AUC
 # How do I pick the best noise
+    # Examing all metrics
 # Epsilon increases over rounds right?
+    # Record new epsilon per round and accumulate end of day
 
 class Server:
     def __init__(self, grid: Grid, context: Context) -> None:
@@ -51,7 +54,7 @@ class Server:
         return model.state_dict()
 
     def split_data(
-            self, raw_flows: list[int], 
+            self, raw_flows: list[int],
             train_ratio: float = 0.8,
             random_seed: Optional[int] = None,
             csv_path: Optional[str] = None) -> list[list[int]]:
@@ -84,6 +87,7 @@ class Server:
             clients[i].append(flow_id)
         return clients
 
+# Remove previous memory mapped files from session
 def clear_directory(path: str) -> None:
     for file_name in os.listdir(path):
         file_path = os.path.join(path, file_name)
@@ -97,10 +101,12 @@ def main(grid: Grid, context: Context) -> None:
     
     uavids_path = "fed_cl_ids/data_pipeline/splits/uavids_days.yaml"
     raw_uavids_days = yaml.safe_load(open(uavids_path))
+    # Assuming dict is ordered by days
     raw_uavids_days = list(raw_uavids_days.items())[:server.n_days]
     uavids_days: dict[str, list[int]] = dict(raw_uavids_days)
 
     runtime_path = os.path.join("fed_cl_ids", "runtime")
+    os.makedirs(runtime_path, exist_ok=True)
     clear_directory(runtime_path)
 
     start = time.time()

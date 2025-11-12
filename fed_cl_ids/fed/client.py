@@ -1,12 +1,12 @@
 from flwr.app import ArrayRecord, Context, Message, MetricRecord, RecordDict
 from flwr.clientapp import ClientApp
 
-from fed_cl_ids.models.losses import Losses
 from fed_cl_ids.fed.replaybuffer import ReplayBuffer
+from fed_cl_ids.models.losses import Losses
 from fed_cl_ids.models.mlp import MLP
 
-from opacus import PrivacyEngine
 from torch.utils.data import DataLoader, TensorDataset
+from opacus import PrivacyEngine
 from torch import Tensor
 import torch
 
@@ -16,7 +16,6 @@ from time import time
 import pandas as pd
 import numpy as np
 import warnings
-import logging
 import random
 import os
 
@@ -90,9 +89,11 @@ class Client:
         n_new_samples = len(train_labels)
 
         if self.cl_enabled:
+            # Could also do: (new_samples * 0.2) / 0.8 = 20%
+            # if er_mix_ratio = 0.2
             true_ratio = (1 - self.er_mix_ratio) / self.er_mix_ratio
             ideal_sample_size = int(n_new_samples / true_ratio)
-
+            
             # Ratio will be off until replay_buffer size >= replay_sample_size
             if self.replay_buffer and ideal_sample_size:
                 actual_samples = min(len(self.replay_buffer), ideal_sample_size)
@@ -105,7 +106,7 @@ class Client:
         data_loader = DataLoader(data, batch_size=self.batch_size, shuffle=True)
         model = self.model
         
-        # Optimizer corresponds per batch, not sample
+        # Optimizer corresponds per batch, not per sample
         # iterations = len(data_loader) * self.epochs
         iterations = len(data_loader) * self.epochs # DP 
         optimizer, scheduler = self.model.get_optimizer(iterations)
@@ -119,7 +120,7 @@ class Client:
                 data_loader=data_loader,
                 noise_multiplier=1.0, 
                 max_grad_norm=1.0, # Clipping
-                clipping='flat', # Per layer
+                clipping='flat', # Per individual sample (slow?)
                 poisson_sampling=True # DP sampling method
             )
             
@@ -176,6 +177,8 @@ class Client:
             new_labels = torch.stack(new_labels)
             self.replay_buffer.append(new_features, new_labels)
         
+        # Model has privacy wrapper around it and fisher_information
+        # Find direct access to MLP module.
         if self.dp_enabled:
             self._initialize_model(self.context)
             self.update_model(model._module.state_dict())
@@ -264,6 +267,7 @@ a new client. Context allows persistence for the process to obtain client'''
 def assign_context(function: Callable):
     def wrapper(msg: Message, context: Context) -> Message:
         if not hasattr(context, '_client'):
+            # Just pass context
             client = Client()
             client.context = context
             client._initialize_model(context)
@@ -277,8 +281,7 @@ def assign_context(function: Callable):
             n_features = int(context.run_config['n-features'])
             client.replay_buffer = ReplayBuffer(os.getpid(), n_features)
             context._client = client
-        else:
-            client: Client = context._client
+        client: Client = context._client
         client_result: Message = function(client, msg)
         return client_result
     return wrapper

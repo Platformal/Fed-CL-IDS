@@ -21,10 +21,6 @@ class ReplayBuffer:
         self._features: np.memmap
         self._labels: np.memmap
 
-        # Initialize directory
-        # Move to server.py, very redundant
-        os.makedirs(path, exist_ok=True)
-
     def sample(self, n_samples: int) -> tuple[Tensor, Tensor]:
         if not self._length:
             raise ValueError("EMPTY REPLAY BUFFER")
@@ -58,8 +54,7 @@ class ReplayBuffer:
         new_length = self._length + len(labels)
         mode = 'r+' if self._length else 'w+'
 
-        # Don't want it to create a new size every call
-        # Use something similar to arraylist; double capacity
+        # Could we double capacity at size threshold and store current size?
         # Could also combine them into one .dat file
         new_features = np.memmap(
             self._features_path,
