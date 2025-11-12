@@ -21,10 +21,6 @@ class ReplayBuffer:
         self._features: np.memmap
         self._labels: np.memmap
 
-        # Initialize directory
-        # Move to server.py, very redundant
-        os.makedirs(path, exist_ok=True)
-
     def sample(self, n_samples: int) -> tuple[Tensor, Tensor]:
         if not self._length:
             raise ValueError("EMPTY REPLAY BUFFER")

@@ -84,6 +84,7 @@ class Server:
             clients[i].append(flow_id)
         return clients
 
+# Remove previous memory mapped files from session
 def clear_directory(path: str) -> None:
     for file_name in os.listdir(path):
         file_path = os.path.join(path, file_name)
@@ -97,10 +98,12 @@ def main(grid: Grid, context: Context) -> None:
     
     uavids_path = "fed_cl_ids/data_pipeline/splits/uavids_days.yaml"
     raw_uavids_days = yaml.safe_load(open(uavids_path))
+    # Assuming dict is ordered by days
     raw_uavids_days = list(raw_uavids_days.items())[:server.n_days]
     uavids_days: dict[str, list[int]] = dict(raw_uavids_days)
 
     runtime_path = os.path.join("fed_cl_ids", "runtime")
+    os.makedirs(runtime_path, exist_ok=True)
     clear_directory(runtime_path)
 
     start = time.time()

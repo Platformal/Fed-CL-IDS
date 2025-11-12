@@ -3,15 +3,14 @@ from torch.optim.adam import Adam
 from torch import nn, Tensor
 
 class MLP(nn.Module):
-    # Values should be initialized by the server and passed onto clients
     def __init__(
             self,
-            n_features: int =  0, 
-            hidden_widths: list[int] = [],
-            dropout: float = 0.0, 
-            weight_decay: float = 0.0,
-            lr_max: float = 0.0, 
-            lr_min: float = 0.0
+            n_features: int, 
+            hidden_widths: list[int],
+            dropout: float, 
+            weight_decay: float,
+            lr_max: float, 
+            lr_min: float
         ) -> None:
         super().__init__()
         self.n_features = n_features
@@ -40,7 +39,7 @@ class MLP(nn.Module):
 
     def _create_network(self) -> nn.Sequential:
         layers = []
-        prev_dimension = self.n_features # Input dimensions
+        prev_dimension = self.n_features # Initial input dimensions
         for width in self.hidden_widths:
             layers.extend((
                 nn.Linear(prev_dimension, width), # Main layer

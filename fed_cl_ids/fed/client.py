@@ -16,7 +16,6 @@ from time import time
 import pandas as pd
 import numpy as np
 import warnings
-import logging
 import random
 import os
 
@@ -90,6 +89,9 @@ class Client:
         n_new_samples = len(train_labels)
 
         if self.cl_enabled:
+            # Calculate samples to achieve 80:20 ratio
+            # current_samples / (0.8 / 0.2) = 20% of total samples
+            # == (current * 0.2) / 0.8
             true_ratio = (1 - self.er_mix_ratio) / self.er_mix_ratio
             ideal_sample_size = int(n_new_samples / true_ratio)
 
@@ -105,7 +107,7 @@ class Client:
         data_loader = DataLoader(data, batch_size=self.batch_size, shuffle=True)
         model = self.model
         
-        # Optimizer corresponds per batch, not sample
+        # Optimizer corresponds per batch, not per sample
         # iterations = len(data_loader) * self.epochs
         iterations = len(data_loader) * self.epochs # DP 
         optimizer, scheduler = self.model.get_optimizer(iterations)
@@ -119,7 +121,7 @@ class Client:
                 data_loader=data_loader,
                 noise_multiplier=1.0, 
                 max_grad_norm=1.0, # Clipping
-                clipping='flat', # Per layer
+                clipping='flat', # Per individual sample (slow?)
                 poisson_sampling=True # DP sampling method
             )
             
@@ -176,6 +178,8 @@ class Client:
             new_labels = torch.stack(new_labels)
             self.replay_buffer.append(new_features, new_labels)
         
+        # Model has privacy wrapper around it and fisher_information
+        # Find direct access to MLP module.
         if self.dp_enabled:
             self._initialize_model(self.context)
             self.update_model(model._module.state_dict())
