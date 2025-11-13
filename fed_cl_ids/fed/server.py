@@ -34,14 +34,14 @@ class Server:
         self.n_rounds = int(context.run_config['n-rounds'])
         self.federated_model = UAVIDSFedAvg(
             fraction_train=self.fraction_train,
-            fraction_eval=self.fraction_evaluate
+            fraction_eval=self.fraction_evaluate,
         )
-        self.current_parameters = self._model_initial_parameters(context)
+        self.current_parameters = self._initial_parameters(context)
 
         self.dataframe: pd.DataFrame
         self.dataframe_path: str = ''
 
-    def _model_initial_parameters(self, context: Context) -> dict[str, Tensor]:
+    def _initial_parameters(self, context: Context) -> dict[str, Tensor]:
         widths = str(context.run_config['mlp-widths'])
         model = MLP(
             n_features=int(context.run_config['n-features']),
@@ -58,8 +58,8 @@ class Server:
             train_ratio: float = 0.8,
             random_seed: Optional[int] = None,
             csv_path: Optional[str] = None) -> list[list[int]]:
-        '''If passed in a path, proportionally split the multiclass labels
-        (stratification) to train and test sets'''
+        """If passed in a path, proportionally split the multiclass labels
+        (stratification) to train and test sets"""
         labels: Optional[pd.Series] = None
         if csv_path:
             if not self.dataframe_path or self.dataframe_path != csv_path:
@@ -130,7 +130,12 @@ def main(grid: Grid, context: Context) -> None:
             evaluate_config=evaluate_config
         )
 
-        server.current_parameters = result.arrays.to_torch_state_dict()
+        # server.current_parameters = result.arrays.to_torch_state_dict()
+        # I would assume the resulting arrays are already in cpu
+        server.current_parameters = {
+            key: state.cpu()
+            for key, state in result.arrays.to_torch_state_dict().items()
+        }
         torch.save(server.current_parameters, f"fed_cl_ids/outputs/Day{day}.pt")
         metrics = result.evaluate_metrics_clientapp.popitem()
         with open("fed_cl_ids/outputs/metrics.txt", 'a') as file:

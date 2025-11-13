@@ -35,23 +35,29 @@ clientapp = "fed_cl_ids.fed.client:app"
 # Example: flwr run -c 'max-days=2 n-rounds=3'
 # Flower context.config can only process str, bool, float, int, str
 [tool.flwr.app.config]
-n-rounds = 80
-max-days = 4
 fraction-train = 0.5
-fraction-evaluate = 0.5
+fraction-evaluate = 1.0
+max-days = 4
 epochs = 2
-dp-enabled = false
-cl-enabled = true
-ewc-lambda = 50
-er-memory = 0.005
-er-alpha = 0.2 # (0, 1)
-n-features = 18
+n-rounds = 80
+batch-size = 128
+
 mlp-widths = "256,256,128,64"
 mlp-dropout = 0.2
 mlp-weight-decay = 1e-4
 mlp-lr-max = 1e-3
 mlp-lr-min = 1e-4
-batch-size = 128
+
+cl-enabled = true
+ewc-lambda = 50
+er-memory = 0.005
+er-mix-ratio = 0.2 # (0, 1)
+n-features = 18
+
+dp-enabled = true
+clipping = 0.5
+noise = 0.5
+delta = 1e-5
 
 # Default federation to use when running the app
 [tool.flwr.federations]
