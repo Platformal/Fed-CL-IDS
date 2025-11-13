@@ -23,35 +23,38 @@ import os
 warnings.filterwarnings("ignore")
 
 class Client:
-    def __init__(self) -> None:
-        self.model: MLP
+    def __init__(self, context: Context) -> None:
+        self.model: MLP = self._initialize_model(context)
         self.criterion = torch.nn.BCEWithLogitsLoss()
+
+        self.epochs = int(context.run_config['epochs'])
+        self.dp_enabled = bool(context.run_config['dp-enabled'])
+        self.cl_enabled = bool(context.run_config['cl-enabled'])
+        self.ewc_lambda = float(context.run_config['ewc-lambda'])
+        self.er_sample_rate = float(context.run_config['er-memory'])
+        self.er_mix_ratio = float(context.run_config['er-alpha'])
+        self.batch_size = int(context.run_config['batch-size'])
+        
+        self.context = context
+
+        # Data cache
         self.dataframe: pd.DataFrame
         self.dataframe_path: str = ''
-        self.context: Context
 
-        # toml configurables
-        self.epochs: int
-        self.dp_enabled: bool
-        self.cl_enabled: bool
-        self.ewc_half_lambda: float
-        self.er_sample_rate: float
-        self.er_mix_ratio: float
-        self.batch_size: int
-
-        # Continual learning attributes
+        # Continual Learning (experience replay + elastic weight consolidation)
         self.total_flows: int = 0
-        self.replay_buffer: ReplayBuffer
+        n_features = int(context.run_config['n-features'])
+        self.replay_buffer = ReplayBuffer(os.getpid(), n_features)
         self.prev_parameters: dict[str, Tensor] = {}
         self.fisher_diagonal: dict[str, Tensor] = {}
 
         # Differential privacy attributes
-        self.stored_epsilon: Optional[float] = None
+        self.stored_epsilon: Optional[float] = None # Return with evaluate
         self.privacy_engine = PrivacyEngine(accountant='rdp')
     
-    def _initialize_model(self, context: Context) -> None:
+    def _initialize_model(self, context: Context) -> MLP:
         widths = str(context.run_config['mlp-widths'])
-        self.model = MLP(
+        model = MLP(
             n_features=int(context.run_config['n-features']),
             hidden_widths=[int(x) for x in widths.split(',')],
             dropout=float(context.run_config['mlp-dropout']),
@@ -59,6 +62,7 @@ class Client:
             lr_max=float(context.run_config['mlp-lr-max']),
             lr_min=float(context.run_config['mlp-lr-min'])
         )
+        return model
 
     def update_model(self, parameters: dict[str, Tensor]) -> None:
         self.model.load_state_dict(parameters)
@@ -105,14 +109,12 @@ class Client:
         data = TensorDataset(train_features, train_labels)
         data_loader = DataLoader(data, batch_size=self.batch_size, shuffle=True)
         model = self.model
-        
-        # Optimizer corresponds per batch, not per sample
-        # iterations = len(data_loader) * self.epochs
-        iterations = len(data_loader) * self.epochs # DP 
-        optimizer, scheduler = self.model.get_optimizer(iterations)
+        # Scheduler uses per batch, not per sample
+        iterations = len(data_loader) * self.epochs 
+        optimizer, scheduler = self.model.get_optimizers(iterations)
         running_loss = 0.0
 
-        # Reassign for differential privacy
+        # Wrappers around the original objects
         if self.dp_enabled:
             model, optimizer, *_, data_loader = self.privacy_engine.make_private(
                 module=self.model,
@@ -124,7 +126,6 @@ class Client:
                 poisson_sampling=True # DP sampling method
             )
             
-        # Training time is around 5 seconds
         start = time()
         for _ in range(self.epochs):
             for batch in data_loader:
@@ -149,9 +150,10 @@ class Client:
                         nested_term = nested_term.pow(2)
                         penalty = f_i * nested_term
                         ewc_loss += penalty.sum()
-                    loss += self.ewc_half_lambda * ewc_loss
+                    loss += (self.ewc_lambda / 2) * ewc_loss
                 
-                loss.backward() # Computes mini-batch SGD
+                loss.backward() # Calculate where to step using mini-batch SGD
+                # Step forward
                 optimizer.step() # Update weights using gradient descent
                 scheduler.step() # Adjust learning rate
                 optimizer.zero_grad() # Reset for next batch
@@ -160,7 +162,7 @@ class Client:
 
         if self.dp_enabled:
             delta = 1e-5
-            epsilon = self.privacy_engine.get_epsilon(delta)
+            self.stored_epsilon = self.privacy_engine.get_epsilon(delta)
 
         total_samples = max(1, len(train_labels))
         avg_loss = running_loss / total_samples
@@ -264,26 +266,11 @@ class Client:
 
 '''Client object needs to be cached or else each round would have to create
 a new client. Context allows persistence for the process to obtain client'''
-def assign_context(function: Callable):
+def assign_context(function: Callable) -> Callable:
     def wrapper(msg: Message, context: Context) -> Message:
         if not hasattr(context, '_client'):
-            # Just pass context
-            client = Client()
-            client.context = context
-            client._initialize_model(context)
-            client.epochs = int(context.run_config['epochs'])
-            client.dp_enabled = bool(context.run_config['dp-enabled'])
-            client.cl_enabled = bool(context.run_config['cl-enabled'])
-            client.ewc_half_lambda = float(context.run_config['ewc-lambda']) / 2
-            client.er_sample_rate = float(context.run_config['er-memory'])
-            client.er_mix_ratio = float(context.run_config['er-alpha'])
-            client.batch_size = int(context.run_config['batch-size'])
-            n_features = int(context.run_config['n-features'])
-            client.replay_buffer = ReplayBuffer(os.getpid(), n_features)
-            context._client = client
-        client: Client = context._client
-        client_result: Message = function(client, msg)
-        return client_result
+            context._client = Client(context)
+        return function(context._client, msg)
     return wrapper
 
 app = ClientApp()

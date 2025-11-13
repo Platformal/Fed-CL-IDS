@@ -25,7 +25,7 @@ class MLP(nn.Module):
     def forward(self, features: Tensor) -> Tensor:
         return self.network(features)
 
-    def get_optimizer(self, n_iterations: int) -> tuple[Adam, CosineAnnealingLR]:
+    def get_optimizers(self, n_iterations: int) -> tuple[Adam, CosineAnnealingLR]:
         optimizer = Adam(
             params=self.parameters(),
             lr=self.lr_max,

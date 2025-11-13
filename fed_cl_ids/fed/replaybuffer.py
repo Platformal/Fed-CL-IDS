@@ -3,6 +3,8 @@ from torch import Tensor
 import torch
 import os
 
+# Ideally want to store labels as bool/uint8
+
 class ReplayBuffer:
     '''Maps the replay buffer to disk.
     The runtime folder should be cleared every run'''
@@ -23,9 +25,9 @@ class ReplayBuffer:
 
     def sample(self, n_samples: int) -> tuple[Tensor, Tensor]:
         if not self._length:
-            raise ValueError("EMPTY REPLAY BUFFER")
+            raise ValueError("Empty replay buffer.")
         if n_samples > self._length:
-            raise ValueError("SAMPLE SIZE TOO BIG")
+            raise ValueError("Sample size larger than replay buffer size.")
 
         self._open_mmap()
         sample_indices = np.random.choice(self._length, n_samples, replace=False)
@@ -54,7 +56,8 @@ class ReplayBuffer:
         new_length = self._length + len(labels)
         mode = 'r+' if self._length else 'w+'
 
-        # Could we double capacity at size threshold and store current size?
+        # Don't want it to create a new size every call
+        # Use something similar to arraylist; double capacity
         # Could also combine them into one .dat file
         new_features = np.memmap(
             self._features_path,
