@@ -30,7 +30,7 @@ class Client:
         self.device = torch.device(device_str)
         self.model: MLP = self._initialize_model(context)
         self.criterion = torch.nn.BCEWithLogitsLoss() # Automatically on device
-        self.context = context
+        self._context = context
 
         # Continual learning
         self.cl_enabled = bool(context.run_config['cl-enabled'])
@@ -38,9 +38,8 @@ class Client:
         self.er_sample_rate = float(context.run_config['er-memory'])
         self.er_mix_ratio = float(context.run_config['er-mix-ratio'])
         self.ewc_lambda = float(context.run_config['ewc-lambda'])
-        n_features = int(context.run_config['n-features'])
         self.total_flows: int = 0
-        self.replay_buffer = ReplayBuffer(os.getpid(), n_features)
+        self.replay_buffer = ReplayBuffer(identifier=os.getpid())
         # Elastic weight consolidation
         self.prev_parameters: dict[str, Tensor] = {}
         self.fisher_diagonal: dict[str, Tensor] = {}
@@ -100,8 +99,7 @@ class Client:
         n_new_samples = len(train_labels)
 
         if self.cl_enabled:
-            samples = self._sample_replay_buffer(n_new_samples)
-            if samples:
+            if samples := self._sample_replay_buffer(n_new_samples):
                 old_features, old_labels = samples
                 train_features = torch.cat((train_features, old_features))
                 train_labels = torch.cat((train_labels, old_labels))
@@ -193,7 +191,7 @@ class Client:
         # self.model (I think) with GradSampleModule as wrapper model
         if self.dp_enabled:
             trained_parameters = model._module.state_dict()
-            self.model = self._initialize_model(self.context)
+            self.model = self._initialize_model(self._context)
             self.update_model(trained_parameters)
 
         self.fisher_diagonal = self._fisher_information(train_set)
@@ -205,19 +203,18 @@ class Client:
         return avg_loss
     
     def _sample_replay_buffer(self, n_new_samples: int) -> tuple[Tensor, Tensor]:
+        if not self.er_mix_ratio:
+            return tuple()
         if self.er_mix_ratio >= 1.0:
             raise ValueError("Experience replay cannot be 100%")
-        # Could also do: (new_samples * 0.2) / 0.8 = 20% of total
-        # if er_mix_ratio = 0.2
+        # Could also do: (new_samples * 0.2) / 0.8 = 20% of total (mix = 0.2)
         true_ratio = (1 - self.er_mix_ratio) / self.er_mix_ratio
         ideal_sample_size = int(n_new_samples / true_ratio)
         actual_sample_size = min(len(self.replay_buffer), ideal_sample_size)
-        # Ratio will be off until replay buffer size >= replay sample size
         if not actual_sample_size:
             return tuple()
-        samples = self.replay_buffer.sample(actual_sample_size)
-        old_features, old_labels = samples
-        return old_features, old_labels
+        # Ratio will be off until replay buffer size >= replay sample size
+        return self.replay_buffer.sample(actual_sample_size)
 
     def _fisher_information(self, train_set: tuple[Tensor, Tensor]) -> dict[str, Tensor]:
         self.model.eval()
