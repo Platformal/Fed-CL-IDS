@@ -100,15 +100,8 @@ class Client:
         n_new_samples = len(train_labels)
 
         if self.cl_enabled:
-            # Could also do: (new_samples * 0.2) / 0.8 = 20%
-            # if er_mix_ratio = 0.2
-            true_ratio = (1 - self.er_mix_ratio) / self.er_mix_ratio
-            ideal_sample_size = int(n_new_samples / true_ratio)
-            
-            # Ratio will be off until replay_buffer size >= replay_sample_size
-            if self.replay_buffer and ideal_sample_size:
-                actual_samples = min(len(self.replay_buffer), ideal_sample_size)
-                samples = self.replay_buffer.sample(actual_samples)
+            samples = self._sample_replay_buffer(n_new_samples)
+            if samples:
                 old_features, old_labels = samples
                 train_features = torch.cat((train_features, old_features))
                 train_labels = torch.cat((train_labels, old_labels))
@@ -125,9 +118,10 @@ class Client:
         iterations = len(data_loader) * self.epochs 
         optimizer, scheduler = self.model.get_optimizers(iterations)
 
-        # Wrappers around the original objects
+        # Supposedly applies wrappers around the original objects
         # N forward passes + N backward passes per batch (where N = batch size)
-        # Dramatic slowdown and not GPU bound, so CUDA is useless here
+        # Time is relative to size of dataset to train
+        # Not GPU bound, so CUDA is useless here
         if self.dp_enabled:
             model, optimizer, *_, data_loader = self.privacy_engine.make_private(
                 module=self.model,
@@ -172,7 +166,7 @@ class Client:
                 optimizer.step() # Update weights using gradient descent
                 scheduler.step() # Adjust learning rate
                 optimizer.zero_grad() # Reset for next batch
-                running_loss += loss.item() * batch_labels.size(0)
+                running_loss += loss.item() * len(batch_labels)
         print(f"{time() - loop_start=}")
                 
         # if self.dp_enabled:
@@ -196,7 +190,7 @@ class Client:
             self.replay_buffer.append(new_features, new_labels)
         
         # Reinitialize because PrivacyEngine added new parameters to 
-        # self.model (I think) with GradSampleModule
+        # self.model (I think) with GradSampleModule as wrapper model
         if self.dp_enabled:
             trained_parameters = model._module.state_dict()
             self.model = self._initialize_model(self.context)
@@ -210,6 +204,21 @@ class Client:
         }
         return avg_loss
     
+    def _sample_replay_buffer(self, n_new_samples: int) -> tuple[Tensor, Tensor]:
+        if self.er_mix_ratio >= 1.0:
+            raise ValueError("Experience replay cannot be 100%")
+        # Could also do: (new_samples * 0.2) / 0.8 = 20% of total
+        # if er_mix_ratio = 0.2
+        true_ratio = (1 - self.er_mix_ratio) / self.er_mix_ratio
+        ideal_sample_size = int(n_new_samples / true_ratio)
+        actual_sample_size = min(len(self.replay_buffer), ideal_sample_size)
+        # Ratio will be off until replay buffer size >= replay sample size
+        if not actual_sample_size:
+            return tuple()
+        samples = self.replay_buffer.sample(actual_sample_size)
+        old_features, old_labels = samples
+        return old_features, old_labels
+
     def _fisher_information(self, train_set: tuple[Tensor, Tensor]) -> dict[str, Tensor]:
         self.model.eval()
         fisher: dict[str, Tensor] = {
@@ -261,7 +270,7 @@ class Client:
                 
                 correct += (predictions == batch_labels).sum().item()
                 batch_loss: Tensor = self.criterion(outputs, batch_labels)
-                total_loss += batch_loss.item() * batch_labels.size(0) # len(batch_labels)?
+                total_loss += batch_loss.item() * len(batch_labels)
 
                 all_predictions.extend(predictions.cpu().numpy())
                 all_probabilities.extend(probabilities.cpu().numpy())

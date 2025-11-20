@@ -3,8 +3,6 @@ from torch import Tensor
 import torch
 import os
 
-# Ideally want to store labels as bool/uint8
-
 class ReplayBuffer:
     '''Maps the replay buffer to disk.
     The runtime folder should be cleared every run'''
