@@ -4,18 +4,16 @@ import torch
 import os
 
 class ReplayBuffer:
-    '''Maps the replay buffer to disk.
-    The runtime folder should be cleared every run'''
+    """Maps the replay buffer to disk.
+    The runtime folder should be cleared every run"""
     def __init__(
-            self, identifier: int | str, 
-            n_features: int,
+            self, identifier: int | str, np_dtype: str = 'float32',
             path: str = os.path.join("fed_cl_ids", "runtime")) -> None:
-        self._n_features = n_features
+        self.dtype = np_dtype
         self._length: int = 0
         
-        self._features_path = os.path.join(path, f"{identifier}_features.dat")
-        self._labels_path = os.path.join(path, f"{identifier}_labels.dat")
-        self._length_path = os.path.join(path, f"{identifier}_length.txt")
+        self.features_path = os.path.join(path, f"{identifier}_features.dat")
+        self.labels_path = os.path.join(path, f"{identifier}_labels.dat")
 
         # Memory mapped, works as any ndarray
         self._features: np.memmap
@@ -27,46 +25,27 @@ class ReplayBuffer:
         if n_samples > self._length:
             raise ValueError("Sample size larger than replay buffer size.")
 
-        self._open_mmap()
         sample_indices = np.random.choice(self._length, n_samples, replace=False)
         features = torch.from_numpy(self._features[sample_indices].copy())
         labels = torch.from_numpy(self._labels[sample_indices].copy())
         return features, labels
-    
-    def _open_mmap(self) -> None:
-        self._features = np.memmap(
-            filename=self._features_path,
-            dtype='float32',
-            mode='r+',
-            shape=(self._length, self._n_features)
-        )
-        self._labels = np.memmap(
-            self._labels_path,
-            dtype='float32',
-            mode='r+',
-            shape=(self._length,)
-        )
 
     def append(self, features: Tensor, labels: Tensor) -> None:
-        np_features = features.detach().numpy().astype('float32')
-        np_labels = labels.detach().numpy().astype('float32')
-
         new_length = self._length + len(labels)
-        mode = 'r+' if self._length else 'w+'
+        writing_mode = 'r+' if self._length else 'w+'
 
-        # Don't want it to create a new size every call
-        # Use something similar to arraylist; double capacity
-        # Could also combine them into one .dat file
+        # Kept features and labels separate, since you don't have to
+        # convert labels to 2D -> 1D and vice versa when sampling
         new_features = np.memmap(
-            self._features_path,
-            dtype='float32',
-            mode=mode,
-            shape=(new_length, self._n_features)
+            self.features_path,
+            dtype=self.dtype,
+            mode=writing_mode,
+            shape=(new_length, features.shape[1])
         )
         new_labels = np.memmap(
-            self._labels_path, 
-            dtype='float32',
-            mode=mode,
+            self.labels_path, 
+            dtype=self.dtype,
+            mode=writing_mode,
             shape=(new_length,)
         )
         
@@ -76,10 +55,9 @@ class ReplayBuffer:
             new_labels[:self._length] = self._labels
             
         # Copy new tensor data
-        new_features[self._length:] = np_features
-        new_labels[self._length:] = np_labels
+        new_features[self._length:] = features.detach()
+        new_labels[self._length:] = labels.detach()
         
-
         # Write changes in the array to respective .dat file.
         new_features.flush()
         new_labels.flush()
