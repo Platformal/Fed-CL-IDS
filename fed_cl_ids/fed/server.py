@@ -2,7 +2,7 @@ from flwr.app import ArrayRecord, ConfigRecord, Context
 from flwr.serverapp import Grid, ServerApp
 
 from sklearn.model_selection import train_test_split
-from fed_cl_ids.fed.CustomStrategies import UAVIDSFedAvg
+from fed_cl_ids.fed.customstrategies import UAVIDSFedAvg
 from fed_cl_ids.models.mlp import MLP
 
 from typing import Optional
@@ -21,7 +21,12 @@ import os
     # Examing all metrics
 # Epsilon increases over rounds right?
     # Record new epsilon per round and accumulate end of day
-
+"""
+Aggregate per round, and add to the sum, which will be the result each day.
+Bytes per round: Report each round, will be dynamic.
+Five random seeds. Unneeded.
+T-test to check for difference between the centralized and federated baselines.
+"""
 class Server:
     def __init__(self, grid: Grid, context: Context) -> None:
         self.fraction_train = float(context.run_config['fraction-train'])
@@ -127,7 +132,7 @@ def main(grid: Grid, context: Context) -> None:
             current_day=day,
             num_rounds=server.n_rounds,
             train_config=train_config,
-            evaluate_config=evaluate_config
+            evaluate_config=evaluate_config,
         )
 
         # server.current_parameters = result.arrays.to_torch_state_dict()

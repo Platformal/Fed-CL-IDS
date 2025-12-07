@@ -25,18 +25,21 @@ class MLP(nn.Module):
     def forward(self, features: Tensor) -> Tensor:
         return self.network(features)
 
-    def get_optimizers(self, n_iterations: int) -> tuple[Adam, CosineAnnealingLR]:
+    def get_optimizer(self) -> Adam:
         optimizer = Adam(
             params=self.parameters(),
             lr=self.lr_max,
             weight_decay=self.weight_decay
         )
+        return optimizer
+    
+    def get_scheduler(self, optimizer: Adam, cosine_epochs: int) -> CosineAnnealingLR:
         scheduler = CosineAnnealingLR(
             optimizer=optimizer,
             eta_min=self.lr_min,
-            T_max=n_iterations
+            T_max=cosine_epochs
         )
-        return optimizer, scheduler
+        return scheduler
 
     def _create_network(self) -> nn.Sequential:
         layers = []

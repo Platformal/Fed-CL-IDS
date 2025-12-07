@@ -5,7 +5,9 @@ from fed_cl_ids.fed.replaybuffer import ReplayBuffer
 from fed_cl_ids.models.losses import Losses
 from fed_cl_ids.models.mlp import MLP
 
+from opacus.grad_sample.grad_sample_module import GradSampleModule
 from opacus import PrivacyEngine
+
 from torch.utils.data import DataLoader, TensorDataset
 from torch import Tensor
 import torch
@@ -20,19 +22,18 @@ import random
 import os
 
 # Privacy Engine
-warnings.filterwarnings("ignore")
-
+warnings.filterwarnings('ignore')
 class Client:
     def __init__(self, context: Context) -> None:
         self.epochs = int(context.run_config['epochs'])
         self.batch_size = int(context.run_config['batch-size'])
+        # Flower clients always runs on CPU... <(＿　＿)>
         device_str = 'cuda' if torch.cuda.is_available() else 'cpu'
         self.device = torch.device(device_str)
         self.model: MLP = self._initialize_model(context)
         self.criterion = torch.nn.BCEWithLogitsLoss() # Automatically on device
         self._context = context
 
-        # Continual learning
         self.cl_enabled = bool(context.run_config['cl-enabled'])
         # Experience replay
         self.er_sample_rate = float(context.run_config['er-memory'])
@@ -50,9 +51,10 @@ class Client:
         self.noise = float(context.run_config['noise'])
         self.delta = float(context.run_config['delta'])
         self.privacy_engine = PrivacyEngine(accountant='rdp')
-        self.stored_epsilon: Optional[float] = None # Return with evaluate
+        # Set with train, return with evaluate.
+        self.stored_epsilon: Optional[float] = None
 
-        # Data cache
+        # Data cache (probably will be removed with CIC-IDS)
         self.dataframe: pd.DataFrame
         self.dataframe_path: str = ''
     
@@ -107,19 +109,19 @@ class Client:
         data = TensorDataset(train_features, train_labels)
         data_loader = DataLoader(
             dataset=data, 
-            batch_size=self.batch_size, 
+            batch_size=self.batch_size,
             shuffle=True,
             pin_memory=True
         )
         model = self.model
         # Scheduler uses per batch, not per sample
-        iterations = len(data_loader) * self.epochs 
-        optimizer, scheduler = self.model.get_optimizers(iterations)
+        iterations = len(data_loader) * self.epochs
+        optimizer = self.model.get_optimizer()
+        scheduler = self.model.get_scheduler(optimizer, iterations)
 
         # Supposedly applies wrappers around the original objects
         # N forward passes + N backward passes per batch (where N = batch size)
         # Time is relative to size of dataset to train
-        # Not GPU bound, so CUDA is useless here
         if self.dp_enabled:
             model, optimizer, *_, data_loader = self.privacy_engine.make_private(
                 module=self.model,
@@ -202,9 +204,9 @@ class Client:
         }
         return avg_loss
     
-    def _sample_replay_buffer(self, n_new_samples: int) -> tuple[Tensor, Tensor]:
+    def _sample_replay_buffer(self, n_new_samples: int) -> Optional[tuple[Tensor, Tensor]]:
         if not self.er_mix_ratio:
-            return tuple()
+            return None
         if self.er_mix_ratio >= 1.0:
             raise ValueError("Experience replay cannot be 100%")
         # Could also do: (new_samples * 0.2) / 0.8 = 20% of total (mix = 0.2)
@@ -212,7 +214,7 @@ class Client:
         ideal_sample_size = int(n_new_samples / true_ratio)
         actual_sample_size = min(len(self.replay_buffer), ideal_sample_size)
         if not actual_sample_size:
-            return tuple()
+            return None
         # Ratio will be off until replay buffer size >= replay sample size
         return self.replay_buffer.sample(actual_sample_size)
 
@@ -252,8 +254,8 @@ class Client:
         batches = DataLoader(data, batch_size=self.batch_size, shuffle=False)
         
         all_predictions, all_probabilities =  [], []
-        correct = 0
-        total_loss = 0.0
+        n_correct: int = 0
+        total_loss: float = 0.0
         
         with torch.no_grad():
             for batch_features, batch_labels in batches:
@@ -265,7 +267,7 @@ class Client:
                 probabilities = torch.sigmoid(outputs) # auto on self.device
                 predictions = (probabilities >= 0.5).float()
                 
-                correct += (predictions == batch_labels).sum().item()
+                n_correct += (predictions == batch_labels).sum().item()
                 batch_loss: Tensor = self.criterion(outputs, batch_labels)
                 total_loss += batch_loss.item() * len(batch_labels)
 
@@ -278,7 +280,7 @@ class Client:
         total_samples = len(test_set[1])
 
         metrics = {
-            'accuracy': correct / total_samples,
+            'accuracy': n_correct / total_samples,
             'loss': total_loss / total_samples,
             'roc-auc': Losses.roc_auc(all_labels, all_probabilities),
             'pr-auc': Losses.pr_auc(all_labels, all_probabilities),
@@ -294,6 +296,7 @@ def assign_context(function: Callable) -> Callable:
         if not hasattr(context, '_client'):
             context._client = Client(context)
         result: Message = function(context._client, msg)
+        # Never triggered, 'cpu'
         if str(context._client.device) == 'cuda':
             torch.cuda.empty_cache()
         return result

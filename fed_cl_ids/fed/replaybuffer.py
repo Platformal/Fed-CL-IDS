@@ -34,7 +34,7 @@ class ReplayBuffer:
         new_length = self._length + len(labels)
         writing_mode = 'r+' if self._length else 'w+'
 
-        # Kept features and labels separate, since you don't have to
+        # Kept features and labels separate since you don't have to
         # convert labels to 2D -> 1D and vice versa when sampling
         new_features = np.memmap(
             self.features_path,
