@@ -50,7 +50,7 @@ class Server:
         widths = str(context.run_config['mlp-widths'])
         model = MLP(
             n_features=int(context.run_config['n-features']),
-            hidden_widths=[int(x) for x in widths.split(',')],
+            hidden_widths=list(map(int, widths.split(','))),
             dropout=float(context.run_config['mlp-dropout']),
             weight_decay=float(context.run_config['mlp-weight-decay']),
             lr_max=float(context.run_config['mlp-lr-max']),

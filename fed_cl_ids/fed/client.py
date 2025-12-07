@@ -5,12 +5,12 @@ from fed_cl_ids.fed.replaybuffer import ReplayBuffer
 from fed_cl_ids.models.losses import Losses
 from fed_cl_ids.models.mlp import MLP
 
-from opacus.grad_sample.grad_sample_module import GradSampleModule
-from opacus import PrivacyEngine
-
 from torch.utils.data import DataLoader, TensorDataset
 from torch import Tensor
 import torch
+
+from opacus.grad_sample.grad_sample_module import GradSampleModule
+from opacus import PrivacyEngine
 
 from typing import Callable, Optional
 from pprint import pprint
@@ -30,7 +30,8 @@ class Client:
         # Flower clients always runs on CPU... <(＿　＿)>
         device_str = 'cuda' if torch.cuda.is_available() else 'cpu'
         self.device = torch.device(device_str)
-        self.model: MLP = self._initialize_model(context)
+        self.mlp_model: MLP = self._initialize_model(context)
+        self.dp_model: Optional[GradSampleModule] = None
         self.criterion = torch.nn.BCEWithLogitsLoss() # Automatically on device
         self._context = context
 
@@ -51,7 +52,7 @@ class Client:
         self.noise = float(context.run_config['noise'])
         self.delta = float(context.run_config['delta'])
         self.privacy_engine = PrivacyEngine(accountant='rdp')
-        # Set with train, return with evaluate.
+        # Get epsilon with train, return with evaluate.
         self.stored_epsilon: Optional[float] = None
 
         # Data cache (probably will be removed with CIC-IDS)
@@ -62,7 +63,7 @@ class Client:
         widths = str(context.run_config['mlp-widths'])
         model = MLP(
             n_features=int(context.run_config['n-features']),
-            hidden_widths=[int(x) for x in widths.split(',')],
+            hidden_widths=list(map(int, widths.split(','))),
             dropout=float(context.run_config['mlp-dropout']),
             weight_decay=float(context.run_config['mlp-weight-decay']),
             lr_max=float(context.run_config['mlp-lr-max']),
@@ -71,8 +72,8 @@ class Client:
         return model.to(self.device)
 
     def update_model(self, parameters: dict[str, Tensor]) -> None:
-        self.model.load_state_dict(parameters)
-        self.model = self.model.to(self.device)
+        self.mlp_model.load_state_dict(parameters)
+        self.mlp_model = self.mlp_model.to(self.device)
     
     def set_dataframe(self, csv_path: str) -> None:
         if self.dataframe_path and self.dataframe_path == csv_path:
@@ -96,7 +97,7 @@ class Client:
         return tensor_features, tensor_labels
 
     def train(self, train_set: tuple[Tensor, Tensor]) -> float:
-        self.model.train()
+        self.mlp_model.train()
         train_features, train_labels = train_set
         n_new_samples = len(train_labels)
 
@@ -113,18 +114,18 @@ class Client:
             shuffle=True,
             pin_memory=True
         )
-        model = self.model
+        model = self.mlp_model
         # Scheduler uses per batch, not per sample
         iterations = len(data_loader) * self.epochs
-        optimizer = self.model.get_optimizer()
-        scheduler = self.model.get_scheduler(optimizer, iterations)
+        optimizer = self.mlp_model.get_optimizer()
+        scheduler = self.mlp_model.get_scheduler(optimizer, iterations)
 
         # Supposedly applies wrappers around the original objects
         # N forward passes + N backward passes per batch (where N = batch size)
         # Time is relative to size of dataset to train
         if self.dp_enabled:
             model, optimizer, *_, data_loader = self.privacy_engine.make_private(
-                module=self.model,
+                module=self.mlp_model,
                 optimizer=optimizer,
                 data_loader=data_loader,
                 noise_multiplier=self.noise, 
@@ -190,16 +191,16 @@ class Client:
             self.replay_buffer.append(new_features, new_labels)
         
         # Reinitialize because PrivacyEngine added new parameters to 
-        # self.model (I think) with GradSampleModule as wrapper model
+        # self.mlp_model (I think) with GradSampleModule as wrapper model
         if self.dp_enabled:
             trained_parameters = model._module.state_dict()
-            self.model = self._initialize_model(self._context)
+            self.mlp_model = self._initialize_model(self._context)
             self.update_model(trained_parameters)
 
         self.fisher_diagonal = self._fisher_information(train_set)
         self.prev_parameters = {
             name: parameter.clone().detach()
-            for name, parameter in self.model.named_parameters()
+            for name, parameter in self.mlp_model.named_parameters()
             if parameter.requires_grad
         }
         return avg_loss
@@ -219,10 +220,10 @@ class Client:
         return self.replay_buffer.sample(actual_sample_size)
 
     def _fisher_information(self, train_set: tuple[Tensor, Tensor]) -> dict[str, Tensor]:
-        self.model.eval()
+        self.mlp_model.eval()
         fisher: dict[str, Tensor] = {
             name: torch.zeros_like(parameter)
-            for name, parameter in self.model.named_parameters()
+            for name, parameter in self.mlp_model.named_parameters()
             if parameter.requires_grad
         }
         data = TensorDataset(*train_set)
@@ -231,15 +232,15 @@ class Client:
             batch_features: Tensor = batch_features.to(self.device)
             batch_labels: Tensor = batch_labels.to(self.device)
             
-            self.model.zero_grad()
-            outputs: Tensor = self.model(batch_features)
+            self.mlp_model.zero_grad()
+            outputs: Tensor = self.mlp_model(batch_features)
             outputs = outputs.squeeze(1)
             loss: Tensor = self.criterion(outputs, batch_labels)
             loss.backward()
 
             # Sum of square gradients
             with torch.no_grad():
-                for name, parameter in self.model.named_parameters():
+                for name, parameter in self.mlp_model.named_parameters():
                     if parameter.grad is not None:
                         fisher[name] += parameter.grad.detach().pow(2)
 
@@ -248,7 +249,7 @@ class Client:
         return fisher
     
     def evaluate(self, test_set: tuple[Tensor, Tensor]) -> dict[str, float]:
-        self.model.eval()
+        self.mlp_model.eval()
         test_features, test_labels = test_set
         data = TensorDataset(test_features, test_labels)
         batches = DataLoader(data, batch_size=self.batch_size, shuffle=False)
@@ -262,7 +263,7 @@ class Client:
                 batch_features: Tensor = batch_features.to(self.device)
                 batch_labels: Tensor = batch_labels.to(self.device)
 
-                outputs: Tensor = self.model(batch_features)
+                outputs: Tensor = self.mlp_model(batch_features)
                 outputs = outputs.squeeze(1)
                 probabilities = torch.sigmoid(outputs) # auto on self.device
                 predictions = (probabilities >= 0.5).float()
@@ -316,7 +317,7 @@ def client_train(client: Client, msg: Message) -> Message:
 
     average_loss = client.train(train_set)
     # state_dict() auto detaches
-    client_model_params = ArrayRecord(client.model.state_dict())
+    client_model_params = ArrayRecord(client.mlp_model.state_dict())
     metrics = {
         'train_loss': average_loss,
         'num-examples': len(train_set[1])
