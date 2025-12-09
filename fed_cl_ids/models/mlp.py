@@ -1,13 +1,14 @@
 from torch.optim.lr_scheduler import CosineAnnealingLR
 from torch.optim.adam import Adam
 from torch import nn, Tensor
+from typing import Iterable
 
 class MLP(nn.Module):
     # Values should be initialized by the server and passed onto clients
     def __init__(
             self,
             n_features: int, 
-            hidden_widths: list[int],
+            hidden_widths: Iterable[int],
             dropout: float, 
             weight_decay: float,
             lr_max: float, 

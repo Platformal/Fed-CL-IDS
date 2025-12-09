@@ -25,13 +25,12 @@ import os
 warnings.filterwarnings('ignore')
 class Client:
     def __init__(self, context: Context) -> None:
-        self.epochs = int(context.run_config['epochs'])
-        self.batch_size = int(context.run_config['batch-size'])
         # Flower clients always runs on CPU... <(＿　＿)>
         device_str = 'cuda' if torch.cuda.is_available() else 'cpu'
         self.device = torch.device(device_str)
         self.mlp_model: MLP = self._initialize_model(context)
-        self.dp_model: Optional[GradSampleModule] = None
+        self.epochs = int(context.run_config['epochs'])
+        self.batch_size = int(context.run_config['batch-size'])
         self.criterion = torch.nn.BCEWithLogitsLoss() # Automatically on device
         self._context = context
 
@@ -63,7 +62,7 @@ class Client:
         widths = str(context.run_config['mlp-widths'])
         model = MLP(
             n_features=int(context.run_config['n-features']),
-            hidden_widths=list(map(int, widths.split(','))),
+            hidden_widths=map(int, widths.split(',')),
             dropout=float(context.run_config['mlp-dropout']),
             weight_decay=float(context.run_config['mlp-weight-decay']),
             lr_max=float(context.run_config['mlp-lr-max']),
@@ -114,10 +113,10 @@ class Client:
             shuffle=True,
             pin_memory=True
         )
-        model = self.mlp_model
-        # Scheduler uses per batch, not per sample
-        iterations = len(data_loader) * self.epochs
+        model: MLP | GradSampleModule = self.mlp_model
         optimizer = self.mlp_model.get_optimizer()
+        # Scheduler uses per batch, not per sample for iterations
+        iterations = len(data_loader) * self.epochs
         scheduler = self.mlp_model.get_scheduler(optimizer, iterations)
 
         # Supposedly applies wrappers around the original objects
@@ -128,7 +127,7 @@ class Client:
                 module=self.mlp_model,
                 optimizer=optimizer,
                 data_loader=data_loader,
-                noise_multiplier=self.noise, 
+                noise_multiplier=self.noise,
                 max_grad_norm=self.clipping, # Clipping
                 clipping='flat', # Individual sampling (flat) is sloww
                 poisson_sampling=True
@@ -170,9 +169,10 @@ class Client:
                 running_loss += loss.item() * len(batch_labels)
         print(f"{time() - loop_start=}")
                 
-        # if self.dp_enabled:
-        #     self.stored_epsilon = self.privacy_engine.get_epsilon(self.delta)
-
+        # Can't do ternary model else model.to_standard_module()
+        if self.dp_enabled:
+            self.mlp_model = model.to_standard_module()
+        
         total_samples = max(1, len(train_labels))
         avg_loss = running_loss / total_samples
         if not self.cl_enabled:
@@ -190,13 +190,6 @@ class Client:
             new_labels = torch.stack(new_labels)
             self.replay_buffer.append(new_features, new_labels)
         
-        # Reinitialize because PrivacyEngine added new parameters to 
-        # self.mlp_model (I think) with GradSampleModule as wrapper model
-        if self.dp_enabled:
-            trained_parameters = model._module.state_dict()
-            self.mlp_model = self._initialize_model(self._context)
-            self.update_model(trained_parameters)
-
         self.fisher_diagonal = self._fisher_information(train_set)
         self.prev_parameters = {
             name: parameter.clone().detach()
@@ -206,6 +199,12 @@ class Client:
         return avg_loss
     
     def _sample_replay_buffer(self, n_new_samples: int) -> Optional[tuple[Tensor, Tensor]]:
+        """
+        :param n_new_samples: Number of samples in batch to get ratio of with self.er_mix_ratio
+        :type n_new_samples: int
+        :return: Features and labels as tensors or None if sampled size or er_mix_ratio is 0 
+        :rtype: tuple[Tensor, Tensor] | None
+        """
         if not self.er_mix_ratio:
             return None
         if self.er_mix_ratio >= 1.0:
@@ -252,14 +251,14 @@ class Client:
         self.mlp_model.eval()
         test_features, test_labels = test_set
         data = TensorDataset(test_features, test_labels)
-        batches = DataLoader(data, batch_size=self.batch_size, shuffle=False)
+        data_loader = DataLoader(data, batch_size=self.batch_size, shuffle=False)
         
         all_predictions, all_probabilities =  [], []
         n_correct: int = 0
         total_loss: float = 0.0
         
         with torch.no_grad():
-            for batch_features, batch_labels in batches:
+            for batch_features, batch_labels in data_loader:
                 batch_features: Tensor = batch_features.to(self.device)
                 batch_labels: Tensor = batch_labels.to(self.device)
 

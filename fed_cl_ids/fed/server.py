@@ -15,18 +15,6 @@ import yaml
 import time
 import os
 
-# Run on GPU for speed 95% AUC recovery
-    # Use ROC AUC
-# How do I pick the best noise
-    # Examing all metrics
-# Epsilon increases over rounds right?
-    # Record new epsilon per round and accumulate end of day
-"""
-Aggregate per round, and add to the sum, which will be the result each day.
-Bytes per round: Report each round, will be dynamic.
-Five random seeds. Unneeded.
-T-test to check for difference between the centralized and federated baselines.
-"""
 class Server:
     def __init__(self, grid: Grid, context: Context) -> None:
         self.fraction_train = float(context.run_config['fraction-train'])
@@ -50,7 +38,7 @@ class Server:
         widths = str(context.run_config['mlp-widths'])
         model = MLP(
             n_features=int(context.run_config['n-features']),
-            hidden_widths=list(map(int, widths.split(','))),
+            hidden_widths=map(int, widths.split(',')),
             dropout=float(context.run_config['mlp-dropout']),
             weight_decay=float(context.run_config['mlp-weight-decay']),
             lr_max=float(context.run_config['mlp-lr-max']),

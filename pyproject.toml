@@ -10,7 +10,7 @@ build-backend = "hatchling.build"
 [project]
 name = "fed-cl-ids"
 version = "1.0.0"
-description = ""
+description = ''
 license = "Apache-2.0"
 # Dependencies for your Flower App
 dependencies = [
@@ -39,7 +39,7 @@ fraction-train = 0.5
 fraction-evaluate = 1.0
 max-days = 4
 epochs = 2
-n-rounds = 80
+n-rounds = 60
 batch-size = 128
 
 mlp-widths = "256,256,128,64"
