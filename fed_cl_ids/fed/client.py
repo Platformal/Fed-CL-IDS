@@ -1,16 +1,16 @@
 from flwr.app import ArrayRecord, Context, Message, MetricRecord, RecordDict
 from flwr.clientapp import ClientApp
 
-from fed_cl_ids.fed.replaybuffer import ReplayBuffer
-from fed_cl_ids.models.losses import Losses
-from fed_cl_ids.models.mlp import MLP
-
 from torch.utils.data import DataLoader, TensorDataset
 from torch import Tensor
 import torch
 
 from opacus.grad_sample.grad_sample_module import GradSampleModule
 from opacus import PrivacyEngine
+
+from fed_cl_ids.fed.replaybuffer import ReplayBuffer
+from fed_cl_ids.models.losses import Losses
+from fed_cl_ids.models.mlp import MLP
 
 from typing import Callable, Optional
 from pprint import pprint
@@ -119,7 +119,7 @@ class Client:
         iterations = len(data_loader) * self.epochs
         scheduler = self.mlp_model.get_scheduler(optimizer, iterations)
 
-        # Supposedly applies wrappers around the original objects
+        # PrivacyEngine objects wrap around the original objects
         # N forward passes + N backward passes per batch (where N = batch size)
         # Time is relative to size of dataset to train
         if self.dp_enabled:
@@ -137,6 +137,7 @@ class Client:
         loop_start = time()
         for _ in range(self.epochs):
             for batch_features, batch_labels in data_loader:
+                # Poisson sampling could produce empty batch
                 if not len(batch_labels):
                     continue
 
@@ -169,7 +170,6 @@ class Client:
                 running_loss += loss.item() * len(batch_labels)
         print(f"{time() - loop_start=}")
                 
-        # Can't do ternary model else model.to_standard_module()
         if self.dp_enabled:
             self.mlp_model = model.to_standard_module()
         
@@ -180,7 +180,7 @@ class Client:
 
         self.total_flows += n_new_samples
         sampler = tuple(
-            (feature, label) 
+            (feature, label)
             for feature, label in zip(*train_set)
             if random.random() <= self.er_sample_rate
         )
@@ -296,7 +296,7 @@ def assign_context(function: Callable) -> Callable:
         if not hasattr(context, '_client'):
             context._client = Client(context)
         result: Message = function(context._client, msg)
-        # Never triggered, 'cpu'
+        # Never triggered
         if str(context._client.device) == 'cuda':
             torch.cuda.empty_cache()
         return result

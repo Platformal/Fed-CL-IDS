@@ -19,7 +19,7 @@ class Server:
     def __init__(self, grid: Grid, context: Context) -> None:
         self.fraction_train = float(context.run_config['fraction-train'])
         self.fraction_evaluate = float(context.run_config['fraction-evaluate'])
-        self.total_clients = len(list(grid.get_node_ids()))
+        self.total_clients = len(tuple(grid.get_node_ids()))
         self.n_train_clients = int(self.total_clients * self.fraction_train)
         self.n_evaluate_clients = int(self.total_clients * self.fraction_evaluate)
 
