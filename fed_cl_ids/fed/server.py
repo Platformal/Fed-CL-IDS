@@ -1,6 +1,6 @@
 """Starts federated learning from simulation and configuration file"""
+from typing import Optional, Iterable
 from collections import OrderedDict
-from typing import Optional
 import hashlib
 import json
 import time
@@ -15,11 +15,11 @@ from flwr.app import ArrayRecord, ConfigRecord, Context
 from flwr.serverapp import Grid, ServerApp
 
 from sklearn.model_selection import train_test_split
-from fed_cl_ids.fed.customstrategies import UAVIDSFedAvg
+from fed_cl_ids.fed.custom_strategies import UAVIDSFedAvg
 from fed_cl_ids.models.mlp import MLP
 
-class Server:
-    """Main class holding server configurations and strategy."""
+class Configuration:
+    """Stores configurations from pyproject.toml"""
     def __init__(self, grid: Grid, context: Context) -> None:
         self.fraction_train = float(context.run_config['fraction-train'])
         self.fraction_evaluate = float(context.run_config['fraction-evaluate'])
@@ -29,9 +29,14 @@ class Server:
 
         self.n_days = int(context.run_config['max-days'])
         self.n_rounds = int(context.run_config['n-rounds'])
+
+class Server:
+    """Main class holding server configurations and strategy."""
+    def __init__(self, grid: Grid, context: Context) -> None:
+        self.config = Configuration(grid, context)
         self.federated_model = UAVIDSFedAvg(
-            fraction_train=self.fraction_train,
-            fraction_eval=self.fraction_evaluate,
+            fraction_train=self.config.fraction_train,
+            fraction_eval=self.config.fraction_evaluate,
         )
         self.current_parameters = self._initial_parameters(context)
 
@@ -52,7 +57,7 @@ class Server:
 
     def split_data(
             self,
-            raw_flows: list[int],
+            raw_flows: list[int], # Iterable
             train_ratio: float = 0.8,
             random_seed: Optional[int] = None,
             csv_path: Optional[str] = None) -> list[list[int]]:
@@ -69,7 +74,7 @@ class Server:
         :param csv_path: Location of csv file to allow label stratification. 
         Stratifies by the 'label' column.
         :type csv_path: Optional[str]
-        :return: Two lists of integers.
+        :return: Two lists (from train_test_split) of integers.
         :rtype: list[list[int]]
         """
         labels: Optional[pd.Series] = None
@@ -91,7 +96,7 @@ class Server:
         return splits
 
     @staticmethod
-    def distribute_flows(flows: list[int], n_clients: int) -> list[list[int]]:
+    def distribute_flows(flows: Iterable[int], n_clients: int) -> tuple[list[int], ...]:
         """
         Hash each flow by ID and assign to a bucket for each client.
         
@@ -100,9 +105,9 @@ class Server:
         :param n_clients: Number of clients to create buckets.
         :type n_clients: int
         :return: List of integers for each client to process.
-        :rtype: list[list[int]]
+        :rtype: tuple[list[int], ...]
         """
-        clients = [[] for _ in range(n_clients)]
+        clients = tuple([] for _ in range(n_clients))
         for flow_id in flows:
             id_bytes = str(flow_id).encode()
             id_hex = hashlib.sha256(id_bytes).hexdigest()
@@ -126,7 +131,7 @@ app = ServerApp()
 @app.main()
 def main(grid: Grid, context: Context) -> None:
     """
-    Main function for Flower simulation.
+    Triggered when flwr run is called.
     
     :param grid: Description
     :type grid: Grid
@@ -136,10 +141,11 @@ def main(grid: Grid, context: Context) -> None:
     server = Server(grid, context)
 
     uavids_path = "fed_cl_ids/data_pipeline/splits/uavids_days.yaml"
-    raw_uavids_days = yaml.safe_load(open(uavids_path, encoding='utf-8'))
+    with open(uavids_path, encoding='utf-8') as file:
+        raw_days: dict[str, list[int]]= yaml.safe_load(file)
     # Assuming dict is sorted/ordered by days
-    raw_uavids_days = list(raw_uavids_days.items())[:server.n_days]
-    uavids_days: dict[str, list[int]] = dict(raw_uavids_days)
+    filtered_days = tuple(raw_days.items())[:server.config.n_days]
+    uavids_days: dict[str, list[int]] = dict(filtered_days)
 
     runtime_path = os.path.join("fed_cl_ids", "runtime")
     os.makedirs(runtime_path, exist_ok=True)
@@ -150,8 +156,14 @@ def main(grid: Grid, context: Context) -> None:
         data_path = "fed_cl_ids/datasets/UAVIDS-2025 Preprocessed.csv"
         splits = server.split_data(raw_flows, csv_path=data_path)
         train_flows, evaluate_flows = splits
-        train_flows = Server.distribute_flows(train_flows, server.n_train_clients)
-        evaluate_flows = Server.distribute_flows(evaluate_flows, server.n_evaluate_clients)
+        train_flows = Server.distribute_flows(
+            flows=train_flows,
+            n_clients=server.config.n_train_clients
+        )
+        evaluate_flows = Server.distribute_flows(
+            flows=evaluate_flows,
+            n_clients=server.config.n_evaluate_clients
+        )
 
         # UAVIDSFedAvg will split flows to each client
         train_config = ConfigRecord({'flows': json.dumps(train_flows)})
@@ -161,12 +173,12 @@ def main(grid: Grid, context: Context) -> None:
             grid=grid,
             initial_arrays=ArrayRecord(server.current_parameters),
             current_day=day,
-            num_rounds=server.n_rounds,
+            num_rounds=server.config.n_rounds,
             train_config=train_config,
             evaluate_config=evaluate_config,
         )
 
-        # I would assume the resulting arrays are already in cpu. Remove?
+        # I assume the resulting arrays are already in cpu. Remove?
         server.current_parameters = OrderedDict({
             key: state.cpu()
             for key, state in result.arrays.to_torch_state_dict().items()
@@ -175,7 +187,8 @@ def main(grid: Grid, context: Context) -> None:
         metrics = result.evaluate_metrics_clientapp.popitem()
         with open("fed_cl_ids/outputs/metrics.txt", 'a', encoding='utf-8') as file:
             file.write(
-                f"Day {day}: {server.n_train_clients}/{server.total_clients} "
+                f"Day {day}: "
+                f"{server.config.n_train_clients}/{server.config.total_clients} "
                 f"clients: {str(metrics)}\n"
             )
 

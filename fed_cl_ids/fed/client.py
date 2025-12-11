@@ -22,7 +22,7 @@ import torch
 from opacus.grad_sample.grad_sample_module import GradSampleModule
 from opacus import PrivacyEngine
 
-from fed_cl_ids.fed.replaybuffer import ReplayBuffer
+from fed_cl_ids.fed.replay_buffer import ReplayBuffer
 from fed_cl_ids.models.losses import Losses
 from fed_cl_ids.models.mlp import MLP
 
@@ -30,7 +30,7 @@ from fed_cl_ids.models.mlp import MLP
 warnings.filterwarnings('ignore')
 
 class Client:
-    """Acts as an interactive single instance of a client."""
+    """Acts as an interactive instance of a client."""
     def __init__(self, context: Context) -> None:
         device_str = 'cuda' if torch.cuda.is_available() else 'cpu'
         self.device = torch.device(device_str)
@@ -358,9 +358,9 @@ def assign_context(function: Callable) -> Callable:
     :rtype: Callable[..., Any]
     """
     def wrapper(msg: Message, context: Context) -> Message:
-        context._client = getattr(context, '_client', Client(context))
-        result: Message = function(context._client, msg)
-        if str(context._client.device) == 'cuda':
+        context.client: Client = getattr(context, 'client', Client(context))
+        result: Message = function(context.client, msg)
+        if str(context.client.device) == 'cuda':
             torch.cuda.empty_cache()
         return result
     return wrapper
@@ -374,7 +374,7 @@ def client_train(client: Client, msg: Message) -> Message:
     Initializes dataframe for client, trains, and constructs message to send
     back to server.
     
-    :param client: Client object from context._client.
+    :param client: Client object from context.client.
     :type client: Client
     :param msg: Message object sent from the server.
     :type msg: Message
@@ -410,7 +410,7 @@ def client_evaluate(client: Client, msg: Message) -> Message:
     Initializes dataframe for client, evaluates, and constructs message to send
     back to server. 
     
-    :param client: Client object from context._client.
+    :param client: Client object from context.client.
     :type client: Client
     :param msg: Message object sent from the server.
     :type msg: Message

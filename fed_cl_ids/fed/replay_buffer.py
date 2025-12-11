@@ -5,14 +5,19 @@ import torch
 from torch import Tensor
 
 class ReplayBuffer:
-    """Maps the replay buffer to disk.
-    The runtime folder should be cleared every run to prevent file conflicts."""
+    """Maps the replay buffer to disk as a numpy memory-mapped array 
+    (essentially a ndarray).
+    
+    The runtime folder should be cleared every run to prevent file name 
+    conflicts."""
     def __init__(
             self, identifier: int | str, np_dtype: str = 'float32',
             path: str = os.path.join("fed_cl_ids", "runtime")) -> None:
         self.dtype = np_dtype
         self._length: int = 0
 
+        # Two separate files since you don't have to
+        # convert labels to 2D -> 1D and vice versa when sampling
         self.features_path = os.path.join(path, f"{identifier}_features.dat")
         self.labels_path = os.path.join(path, f"{identifier}_labels.dat")
 
@@ -55,8 +60,6 @@ class ReplayBuffer:
         new_length = self._length + len(labels)
         writing_mode = 'r+' if self._length else 'w+'
 
-        # Kept features and labels separate since you don't have to
-        # convert labels to 2D -> 1D and vice versa when sampling
         new_features = np.memmap(
             self.features_path,
             dtype=self.dtype,
@@ -64,7 +67,7 @@ class ReplayBuffer:
             shape=(new_length, features.shape[1])
         )
         new_labels = np.memmap(
-            self.labels_path, 
+            self.labels_path,
             dtype=self.dtype,
             mode=writing_mode,
             shape=(new_length,)
