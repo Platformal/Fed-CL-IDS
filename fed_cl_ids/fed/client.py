@@ -4,6 +4,7 @@ Performs both training and evaluation with a local pytorch MLP module that gets
 its parameters from the server module.
 """
 from typing import Callable, Optional
+from collections import OrderedDict
 from time import time
 import warnings
 import random
@@ -333,13 +334,14 @@ class Client:
                 probabilities = torch.sigmoid(outputs) # auto on self.device
                 predictions = (probabilities >= 0.5).float()
 
-                n_correct += (predictions == batch_labels).sum().item()
+                n_batch_correct: Tensor = (predictions == batch_labels).sum()
+                n_correct += int(n_batch_correct.item())
                 batch_loss: Tensor = self.criterion(outputs, batch_labels)
                 total_loss += batch_loss.item() * len(batch_labels)
 
                 all_predictions.extend(predictions.cpu().numpy())
                 all_probabilities.extend(probabilities.cpu().numpy())
-        
+
         all_predictions = np.array(all_predictions)
         all_probabilities = np.array(all_probabilities)
         all_labels = test_labels.numpy()
@@ -397,14 +399,15 @@ def client_train(client: Client, msg: Message) -> Message:
 
     average_loss = client.train(train_set)
     # state_dict() auto detaches
-    client_model_params = ArrayRecord(client.mlp_model.state_dict())
+    client_params = OrderedDict(client.mlp_model.state_dict())
+    client_array_record = ArrayRecord(client_params)
     metrics = {
         'train_loss': average_loss,
         'num-examples': len(train_set[1])
     }
     metric_record = MetricRecord(metrics)
     content = RecordDict({
-        'arrays': client_model_params,
+        'arrays': client_array_record,
         'metrics': metric_record
     })
     return Message(content, reply_to=msg)
