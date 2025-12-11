@@ -7,7 +7,6 @@ from typing import Callable, Optional
 from collections import OrderedDict
 from time import time
 import warnings
-import random
 import os
 
 import pandas as pd
@@ -159,7 +158,6 @@ class Client:
         )
         model: MLP | GradSampleModule = self.mlp_model
         optimizer = self.mlp_model.get_optimizer()
-        # Scheduler uses per batch, not per sample for iterations
         iterations = len(data_loader) * self.epochs
         scheduler = self.mlp_model.get_scheduler(optimizer, iterations)
 

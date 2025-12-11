@@ -1,17 +1,18 @@
-from torch import Tensor
+"""Module for continual learning replay buffer."""
+import os
 import numpy as np
 import torch
-import os
+from torch import Tensor
 
 class ReplayBuffer:
     """Maps the replay buffer to disk.
-    The runtime folder should be cleared every run"""
+    The runtime folder should be cleared every run to prevent file conflicts."""
     def __init__(
             self, identifier: int | str, np_dtype: str = 'float32',
             path: str = os.path.join("fed_cl_ids", "runtime")) -> None:
         self.dtype = np_dtype
         self._length: int = 0
-        
+
         self.features_path = os.path.join(path, f"{identifier}_features.dat")
         self.labels_path = os.path.join(path, f"{identifier}_labels.dat")
 
@@ -20,6 +21,15 @@ class ReplayBuffer:
         self._labels: np.memmap
 
     def sample(self, n_samples: int) -> tuple[Tensor, Tensor]:
+        """
+        Randomly samples from buffer for tensors.
+        
+        :param n_samples: How many samples to retrieve. Will raise an error if
+        the replay buffer is empty or n_samples is bigger than buffer.
+        :type n_samples: int
+        :return: Tensor of features and labels.
+        :rtype: tuple[Tensor, Tensor]
+        """
         if not self._length:
             raise ValueError("Empty replay buffer.")
         if n_samples > self._length:
@@ -31,6 +41,15 @@ class ReplayBuffer:
         return features, labels
 
     def append(self, features: Tensor, labels: Tensor) -> None:
+        """
+        Add features and labels into memory mapped files. Will early return if
+        size of rows is 0.
+        
+        :param features: Make sure columns of features is consistent.
+        :type features: Tensor
+        :param labels: Make sure number of labels matches rows of features.
+        :type labels: Tensor
+        """
         if not labels.nelement():
             return
         new_length = self._length + len(labels)
@@ -50,16 +69,16 @@ class ReplayBuffer:
             mode=writing_mode,
             shape=(new_length,)
         )
-        
+
         # Copy old tensor data
         if self._length:
             new_features[:self._length] = self._features
             new_labels[:self._length] = self._labels
-            
+
         # Copy new tensor data
         new_features[self._length:] = features.detach()
         new_labels[self._length:] = labels.detach()
-        
+
         # Write changes in the array to respective .dat file.
         new_features.flush()
         new_labels.flush()
@@ -70,6 +89,6 @@ class ReplayBuffer:
 
     def __len__(self) -> int:
         return self._length
-        
+
     def __bool__(self) -> bool:
         return bool(len(self))
