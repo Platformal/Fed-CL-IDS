@@ -1,17 +1,16 @@
+from typing import Iterable
 from torch.optim.lr_scheduler import CosineAnnealingLR
 from torch.optim.adam import Adam
 from torch import nn, Tensor
-from typing import Iterable
 
 class MLP(nn.Module):
-    # Values should be initialized by the server and passed onto clients
     def __init__(
             self,
-            n_features: int, 
+            n_features: int,
             hidden_widths: Iterable[int],
-            dropout: float, 
+            dropout: float,
             weight_decay: float,
-            lr_max: float, 
+            lr_max: float,
             lr_min: float
         ) -> None:
         super().__init__()
@@ -33,7 +32,7 @@ class MLP(nn.Module):
             weight_decay=self.weight_decay
         )
         return optimizer
-    
+
     def get_scheduler(self, optimizer: Adam, cosine_epochs: int) -> CosineAnnealingLR:
         scheduler = CosineAnnealingLR(
             optimizer=optimizer,
@@ -44,15 +43,14 @@ class MLP(nn.Module):
 
     def _create_network(self) -> nn.Sequential:
         layers = []
-        prev_dimension = self.n_features # Input dimensions
+        prev_dimension = self.n_features # Number of inputs
         for width in self.hidden_widths:
             layers.extend((
-                nn.Linear(prev_dimension, width), # Main layer
+                nn.Linear(prev_dimension, width), # Hidden layer
                 nn.LayerNorm(width),
                 nn.ReLU(),
                 nn.Dropout(self.dropout)
             ))
             prev_dimension = width
-        output_layer = nn.Linear(prev_dimension, 1) # Final neuron output
-        layers.append(output_layer)
+        layers.append(nn.Linear(prev_dimension, 1)) # Final neuron output
         return nn.Sequential(*layers)
