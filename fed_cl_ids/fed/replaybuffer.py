@@ -31,6 +31,8 @@ class ReplayBuffer:
         return features, labels
 
     def append(self, features: Tensor, labels: Tensor) -> None:
+        if not labels.nelement():
+            return
         new_length = self._length + len(labels)
         writing_mode = 'r+' if self._length else 'w+'
 

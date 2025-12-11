@@ -223,16 +223,9 @@ class Client:
             return avg_loss
 
         self.total_flows += n_new_samples
-        sampler = tuple(
-            (feature, label)
-            for feature, label in zip(*train_set)
-            if random.random() <= self.er_sample_rate
-        )
-        if sampler:
-            new_features, new_labels = zip(*sampler)
-            new_features = torch.stack(new_features)
-            new_labels = torch.stack(new_labels)
-            self.replay_buffer.append(new_features, new_labels)
+        new_features, new_labels = train_set
+        mask = torch.rand(size=(len(new_labels),)) <= self.er_sample_rate
+        self.replay_buffer.append(new_features[mask], new_labels[mask])
 
         self.fisher_diagonal = self._fisher_information(train_set)
         self.prev_parameters = {
