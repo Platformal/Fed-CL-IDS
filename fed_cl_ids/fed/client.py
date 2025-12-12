@@ -5,6 +5,7 @@ its parameters from the server module.
 """
 from typing import Callable, Optional
 from collections import OrderedDict
+from pathlib import Path
 from time import time
 import warnings
 import os
@@ -28,6 +29,8 @@ from fed_cl_ids.models.mlp import MLP
 
 # Privacy Engine
 warnings.filterwarnings('ignore')
+
+MAIN_PATH = Path().cwd() / 'fed_cl_ids'
 
 class Client:
     """Acts as an interactive instance of a client."""
@@ -62,7 +65,7 @@ class Client:
 
         # Data cache (probably will be removed with CIC-IDS)
         self.dataframe: pd.DataFrame
-        self.dataframe_path: str = ''
+        self.dataframe_path: Optional[Path] = None
 
     def _initialize_model(self, context: Context) -> MLP:
         widths = str(context.run_config['mlp-widths'])
@@ -87,14 +90,14 @@ class Client:
         self.mlp_model.load_state_dict(parameters)
         self.mlp_model = self.mlp_model.to(self.device)
 
-    def set_dataframe(self, csv_path: str) -> None:
+    def set_dataframe(self, csv_path: Path) -> None:
         """
         Load and cache self.dataframe for faster reuse if same csv file.
         
         :param csv_path: Filepath to csv.
         :type csv_path: str
         """
-        if self.dataframe_path and self.dataframe_path == csv_path:
+        if self.dataframe_path is not None and self.dataframe_path == csv_path:
             return
         self.dataframe = pd.read_csv(csv_path, index_col='FlowID')
         self.dataframe_path = csv_path
@@ -358,7 +361,7 @@ def assign_context(function: Callable) -> Callable:
     :rtype: Callable[..., Any]
     """
     def wrapper(msg: Message, context: Context) -> Message:
-        context.client: Client = getattr(context, 'client', Client(context))
+        context.client = getattr(context, 'client', Client(context))
         result: Message = function(context.client, msg)
         if str(context.client.device) == 'cuda':
             torch.cuda.empty_cache()
@@ -384,7 +387,8 @@ def client_train(client: Client, msg: Message) -> Message:
     """
     new_parameters = msg.content['arrays'].to_torch_state_dict()
     client.update_model(new_parameters)
-    client.set_dataframe("fed_cl_ids/datasets/UAVIDS-2025 Preprocessed.csv")
+    dataframe_path = MAIN_PATH / 'datasets' / 'UAVIDS-2025 Preprocessed.csv'
+    client.set_dataframe(dataframe_path)
     flow_ids: list[int] = msg.content['config']['flows']
     train_set = client.get_flow_data(flow_ids)
 
@@ -420,7 +424,8 @@ def client_evaluate(client: Client, msg: Message) -> Message:
     """
     new_parameters = msg.content['arrays'].to_torch_state_dict()
     client.update_model(new_parameters)
-    client.set_dataframe("fed_cl_ids/datasets/UAVIDS-2025 Preprocessed.csv")
+    dataframe_path = MAIN_PATH / 'datasets' / 'UAVIDS-2025 Preprocessed.csv'
+    client.set_dataframe(dataframe_path)
     flow_ids: list[int] = msg.content['config']['flows']
     test_set = client.get_flow_data(flow_ids)
 

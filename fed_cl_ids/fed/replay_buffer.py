@@ -1,5 +1,5 @@
 """Module for continual learning replay buffer."""
-import os
+from pathlib import Path
 import numpy as np
 import torch
 from torch import Tensor
@@ -12,14 +12,14 @@ class ReplayBuffer:
     conflicts."""
     def __init__(
             self, identifier: int | str, np_dtype: str = 'float32',
-            path: str = os.path.join("fed_cl_ids", "runtime")) -> None:
+            path: Path = Path().cwd() / 'fed_cl_ids' / 'runtime') -> None:
         self.dtype = np_dtype
         self._length: int = 0
 
         # Two separate files since you don't have to
         # convert labels to 2D -> 1D and vice versa when sampling
-        self.features_path = os.path.join(path, f"{identifier}_features.dat")
-        self.labels_path = os.path.join(path, f"{identifier}_labels.dat")
+        self.features_path = path / f'{identifier}_features.dat'
+        self.labels_path = path / f'{identifier}_labels.dat'
 
         # Memory mapped, works as any ndarray
         self._features: np.memmap
