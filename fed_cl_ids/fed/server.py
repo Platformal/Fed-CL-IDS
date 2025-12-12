@@ -88,7 +88,7 @@ class Server:
         """
         labels: Optional[pd.Series] = None
         if csv_path:
-            if self.dataframe_path is None or self.dataframe_path != csv_path:
+            if self.dataframe_path is not None or self.dataframe_path != csv_path:
                 self.dataframe_path = csv_path
                 self.dataframe = pd.read_csv(
                     filepath_or_buffer=csv_path,
@@ -178,16 +178,15 @@ def main(grid: Grid, context: Context) -> None:
     clear_directory(RUNTIME_PATH)
     print(time.time() - start)
 
-def clear_directory(path: Path) -> None:
+def clear_directory(filepath: Path) -> None:
     """
     Removes all files in a folder directory
 
     :param path: Path to the folder
     :type path: Path
     """
-    for item in path.iterdir():
-        if item.is_file():
-            item.unlink()
+    for file in [path for path in filepath.iterdir() if path.is_file()]:
+        file.unlink()
 
 def get_uavids(server: Server, filepath: Path) -> dict[str, list[int]]:
     """
