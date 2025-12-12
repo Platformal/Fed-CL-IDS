@@ -218,22 +218,21 @@ class Client:
         if self.dp_enabled:
             self.mlp_model = model.to_standard_module()
 
+            self.fisher_diagonal = self._fisher_information(train_set)
+            self.prev_parameters = {
+                name: parameter.clone().detach()
+                for name, parameter in self.mlp_model.named_parameters()
+                if parameter.requires_grad
+            }
+
+        if self.cl_enabled:
+            self.total_flows += n_new_samples
+            new_features, new_labels = train_set
+            mask = torch.rand(size=(len(new_labels),)) <= self.er_sample_rate
+            self.replay_buffer.append(new_features[mask], new_labels[mask])
+
         total_samples = max(1, len(train_labels))
         avg_loss = running_loss / total_samples
-        if not self.cl_enabled:
-            return avg_loss
-
-        self.total_flows += n_new_samples
-        new_features, new_labels = train_set
-        mask = torch.rand(size=(len(new_labels),)) <= self.er_sample_rate
-        self.replay_buffer.append(new_features[mask], new_labels[mask])
-
-        self.fisher_diagonal = self._fisher_information(train_set)
-        self.prev_parameters = {
-            name: parameter.clone().detach()
-            for name, parameter in self.mlp_model.named_parameters()
-            if parameter.requires_grad
-        }
         return avg_loss
 
     def _sample_replay_buffer(self, n_new_samples: int) -> Optional[tuple[Tensor, Tensor]]:

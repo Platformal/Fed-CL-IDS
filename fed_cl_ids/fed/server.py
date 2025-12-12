@@ -40,7 +40,8 @@ class ServerConfiguration:
         self.n_rounds = int(context.run_config['n-rounds'])
 
 class Server:
-    """Main class holding server configurations and strategy."""
+    """Main class holding configurations, main model parameters, 
+    and federated aggregation method."""
     def __init__(self, grid: Grid, context: Context) -> None:
         self.config = ServerConfiguration(grid, context)
         self.federated_model = UAVIDSFedAvg(
@@ -88,7 +89,7 @@ class Server:
         """
         labels: Optional[pd.Series] = None
         if csv_path:
-            if self.dataframe_path is not None or self.dataframe_path != csv_path:
+            if self.dataframe_path is None or self.dataframe_path != csv_path:
                 self.dataframe_path = csv_path
                 self.dataframe = pd.read_csv(
                     filepath_or_buffer=csv_path,
