@@ -7,65 +7,26 @@ from logging import INFO
 
 from collections.abc import Iterable
 from typing import Callable, Optional
-
+from torch import Tensor
+import torch
 import time
 import io
 import json
 
-def str_config(config: ConfigRecord) -> str:
-    '''Ensures start log does not print all elements in flows.'''
-    all_config_str: list[str] = []
-    for key, value in config.items():
-        try:
-            value = json.loads(value)
-        except:
-            value = value
-        if isinstance(value, bytes):
-            string = f"'{key}': '<bytes>'"
-        elif isinstance(value, list):
-            string = f"'{key}': length = {len(value)}"
-        else:
-            string = f"'{key}': '{value}'"
-        all_config_str.append(string)
-    content = ", ".join(all_config_str)
-    return f"{{{content}}}"
-
-def log_strategy_start_info(
-    num_rounds: int,
-    arrays: ArrayRecord,
-    train_config: Optional[ConfigRecord],
-    evaluate_config: Optional[ConfigRecord],
-) -> None:
-    """Log information about the strategy start."""
-    log(INFO, "\t├── Number of rounds: %d", num_rounds)
-    log(
-        INFO,
-        "\t├── ArrayRecord (%.2f MB)",
-        sum(len(array.data) for array in arrays.values()) / (1024**2),
-    )
-    log(
-        INFO,
-        "\t├── ConfigRecord (train): %s",
-        str_config(train_config) if train_config else "(empty!)",
-    )
-    log(
-        INFO,
-        "\t├── ConfigRecord (evaluate): %s",
-        str_config(evaluate_config) if evaluate_config else "(empty!)",
-    )
-
 class UAVIDSFedAvg(FedAvg):
-    def __init__(self, fraction_train, fraction_eval) -> None:
+    def __init__(self, fraction_train: float, fraction_eval: float) -> None:
         super().__init__(fraction_train, fraction_eval)
         self.train_node_ids: list[int] = []
         self.evaluate_node_ids: list[int] = []
         self.all_node_ids: list[int] = []
+        device_str = 'cuda' if torch.cuda.is_available() else 'cpu'
+        self.device = torch.device(device_str)
     
     # Changed sample_nodes function only to initialize
     def configure_train(
         self, server_round: int, arrays: ArrayRecord, 
         config: ConfigRecord, grid: Grid) -> Iterable[Message]:
-        '''Configure the next round of federated training.'''
+        """Configure the next round of federated training"""
         if self.fraction_train == 0.0:
             return []
         if not self.train_node_ids:
@@ -98,7 +59,7 @@ class UAVIDSFedAvg(FedAvg):
     def configure_evaluate(
         self, server_round: int, arrays: ArrayRecord, config: ConfigRecord, grid: Grid
     ) -> Iterable[Message]:
-        '''Configure the next round of federated evaluation.'''
+        """Configure the next round of federated evaluation"""
         if self.fraction_evaluate == 0.0:
             return []
 
@@ -117,9 +78,10 @@ class UAVIDSFedAvg(FedAvg):
         config["server-round"] = server_round
 
         # Construct messages
-        record = RecordDict(
-            {self.arrayrecord_key: arrays, self.configrecord_key: config}
-        )
+        record = RecordDict({
+            self.arrayrecord_key: arrays,
+            self.configrecord_key: config
+        })
         messages = self._construct_messages(record, self.evaluate_node_ids, MessageType.EVALUATE)
         flows: list[list[int]] = json.loads(config['flows'])
         for i, message in enumerate(messages):
@@ -139,7 +101,7 @@ class UAVIDSFedAvg(FedAvg):
         train_config: Optional[ConfigRecord] = None,
         evaluate_config: Optional[ConfigRecord] = None,
         evaluate_fn: Optional[
-            Callable[[int, ArrayRecord], Optional[MetricRecord]]] = None,
+            Callable[[int, ArrayRecord], Optional[MetricRecord]]] = None
     ) -> Result:
         """Execute the federated learning strategy.
 
@@ -278,3 +240,80 @@ class UAVIDSFedAvg(FedAvg):
         log(INFO, "")
 
         return result
+    
+    def aggregate_train(
+        self,
+        server_round: int,
+        replies: Iterable[Message],
+    ) -> tuple[Optional[ArrayRecord], Optional[MetricRecord]]:
+        """Aggregate ArrayRecords and MetricRecords in the received Messages."""
+        valid_replies, _ = self._check_and_log_replies(replies, is_train=True)
+        if not valid_replies:
+            return None, None
+        
+        reply_contents = [msg.content for msg in valid_replies]
+        arrays: list[dict[str, Tensor]] = [
+            content[self.arrayrecord_key].to_torch_state_dict() 
+            for content in reply_contents
+        ]
+
+        aggregated_model: dict[str, Tensor] = {}
+        with torch.no_grad():
+            # Parameter key example: 'network.9.weight', 'network.9.bias', ...
+            for parameter_key in arrays[0].keys():
+                tensors_of_key: Tensor = torch.stack([
+                    torch.as_tensor(array[parameter_key]).to(self.device)
+                    for array in arrays
+                ], dim=0)
+                averaged_tensor = torch.mean(tensors_of_key, dim=0)
+                aggregated_model[parameter_key] = averaged_tensor.cpu()
+        array_record = ArrayRecord(aggregated_model)
+
+        # Aggregate MetricRecords
+        metrics = self.train_metrics_aggr_fn(
+            reply_contents,
+            self.weighted_by_key,
+        )
+        return array_record, metrics
+    
+def str_config(config: ConfigRecord) -> str:
+    """Ensures start log does not print all elements in flows"""
+    all_config_str: list[str] = []
+    for key, value in config.items():
+        try:
+            value = json.loads(value)
+        except:
+            value = value
+        if isinstance(value, bytes):
+            string = f"'{key}': '<bytes>'"
+        elif isinstance(value, list):
+            string = f"'{key}': length = {len(value)}"
+        else:
+            string = f"'{key}': '{value}'"
+        all_config_str.append(string)
+    content = ", ".join(all_config_str)
+    return f"{{{content}}}"
+
+def log_strategy_start_info(
+    num_rounds: int,
+    arrays: ArrayRecord,
+    train_config: Optional[ConfigRecord],
+    evaluate_config: Optional[ConfigRecord],
+) -> None:
+    """Log information about the strategy start."""
+    log(INFO, "\t├── Number of rounds: %d", num_rounds)
+    log(
+        INFO,
+        "\t├── ArrayRecord (%.2f MB)",
+        sum(len(array.data) for array in arrays.values()) / (1024**2),
+    )
+    log(
+        INFO,
+        "\t├── ConfigRecord (train): %s",
+        str_config(train_config) if train_config else "(empty!)",
+    )
+    log(
+        INFO,
+        "\t├── ConfigRecord (evaluate): %s",
+        str_config(evaluate_config) if evaluate_config else "(empty!)",
+    )

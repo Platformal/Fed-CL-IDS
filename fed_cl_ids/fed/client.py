@@ -1,141 +1,193 @@
+"""
+Representation of a client/supernode in a federated framework.
+Performs both training and evaluation with a local pytorch MLP module that gets
+its parameters from the server module.
+"""
+from typing import Callable, Optional
+from collections import OrderedDict
+from time import time
+import warnings
+import os
+
+import pandas as pd
+import numpy as np
+
 from flwr.app import ArrayRecord, Context, Message, MetricRecord, RecordDict
 from flwr.clientapp import ClientApp
 
-from fed_cl_ids.models.losses import Losses
-from fed_cl_ids.fed.replaybuffer import ReplayBuffer
-from fed_cl_ids.models.mlp import MLP
-
-from opacus import PrivacyEngine
 from torch.utils.data import DataLoader, TensorDataset
 from torch import Tensor
 import torch
 
-from typing import Callable, Optional
-from pprint import pprint
-from time import time
-import pandas as pd
-import numpy as np
-import warnings
-import random
-import os
+from opacus.grad_sample.grad_sample_module import GradSampleModule
+from opacus import PrivacyEngine
+
+from fed_cl_ids.fed.replay_buffer import ReplayBuffer
+from fed_cl_ids.models.losses import Losses
+from fed_cl_ids.models.mlp import MLP
 
 # Privacy Engine
-warnings.filterwarnings("ignore")
+warnings.filterwarnings('ignore')
 
 class Client:
-    def __init__(self) -> None:
-        self.model: MLP
-        self.criterion = torch.nn.BCEWithLogitsLoss()
-        self.dataframe: pd.DataFrame
-        self.dataframe_path: str = ''
-        self.context: Context
+    """Acts as an interactive instance of a client."""
+    def __init__(self, context: Context) -> None:
+        device_str = 'cuda' if torch.cuda.is_available() else 'cpu'
+        self.device = torch.device(device_str)
+        self.mlp_model: MLP = self._initialize_model(context)
+        self.epochs = int(context.run_config['epochs'])
+        self.batch_size = int(context.run_config['batch-size'])
+        self.criterion = torch.nn.BCEWithLogitsLoss() # Automatically on device
+        self._context = context
 
-        # toml configurables
-        self.epochs: int
-        self.dp_enabled: bool
-        self.cl_enabled: bool
-        self.ewc_half_lambda: float
-        self.er_sample_rate: float
-        self.er_mix_ratio: float
-        self.batch_size: int
-
-        # Continual learning attributes
+        self.cl_enabled = bool(context.run_config['cl-enabled'])
+        # Experience replay
+        self.er_sample_rate = float(context.run_config['er-memory'])
+        self.er_mix_ratio = float(context.run_config['er-mix-ratio'])
+        self.ewc_lambda = float(context.run_config['ewc-lambda'])
         self.total_flows: int = 0
-        self.replay_buffer: ReplayBuffer
+        self.replay_buffer = ReplayBuffer(identifier=os.getpid())
+        # Elastic weight consolidation
         self.prev_parameters: dict[str, Tensor] = {}
         self.fisher_diagonal: dict[str, Tensor] = {}
 
-        # Differential privacy attributes
-        self.stored_epsilon: Optional[float] = None
+        # Differential privacy
+        self.dp_enabled = bool(context.run_config['dp-enabled'])
+        self.clipping = float(context.run_config['clipping'])
+        self.noise = float(context.run_config['noise'])
+        self.delta = float(context.run_config['delta'])
         self.privacy_engine = PrivacyEngine(accountant='rdp')
-    
-    def _initialize_model(self, context: Context) -> None:
+        # Get epsilon with train, return with evaluate.
+        self.stored_epsilon: Optional[float] = None
+
+        # Data cache (probably will be removed with CIC-IDS)
+        self.dataframe: pd.DataFrame
+        self.dataframe_path: str = ''
+
+    def _initialize_model(self, context: Context) -> MLP:
         widths = str(context.run_config['mlp-widths'])
-        self.model = MLP(
+        model = MLP(
             n_features=int(context.run_config['n-features']),
-            hidden_widths=[int(x) for x in widths.split(',')],
+            hidden_widths=map(int, widths.split(',')),
             dropout=float(context.run_config['mlp-dropout']),
             weight_decay=float(context.run_config['mlp-weight-decay']),
             lr_max=float(context.run_config['mlp-lr-max']),
             lr_min=float(context.run_config['mlp-lr-min'])
         )
+        return model.to(self.device)
 
     def update_model(self, parameters: dict[str, Tensor]) -> None:
-        self.model.load_state_dict(parameters)
-    
+        """
+        Load a given MLP module's parameters into client's model.
+        Equivalent to using load_state_dict().
+        
+        :param parameters: Keys of parameters and weights with their tensors.
+        :type parameters: dict[str, Tensor]
+        """
+        self.mlp_model.load_state_dict(parameters)
+        self.mlp_model = self.mlp_model.to(self.device)
+
     def set_dataframe(self, csv_path: str) -> None:
+        """
+        Load and cache self.dataframe for faster reuse if same csv file.
+        
+        :param csv_path: Filepath to csv.
+        :type csv_path: str
+        """
         if self.dataframe_path and self.dataframe_path == csv_path:
             return
         self.dataframe = pd.read_csv(csv_path, index_col='FlowID')
         self.dataframe_path = csv_path
 
+    # Samples generated by the dataloader is on CPU instead of CUDA by default
     def get_flow_data(self, flow_ids: list[int]) -> tuple[Tensor, Tensor]:
+        """
+        Uses self.dataframe to transform table of features and label into tensors.
+
+        Assumes label column is called 'label'.
+        
+        Binarizes multiclass labels. So preprocessed benign/normal traffic 
+        should always be zero and malicious traffic should be a non-zero 
+        integer label.
+        
+        :param flow_ids: Integers corresponding to FlowID (indices) to fetch
+        features and labels from.
+        :type flow_ids: list[int]
+        :return: Tuple containing the features (2D) and the labels (1D).
+        :rtype: tuple[Tensor, Tensor]
+        """
         if not hasattr(self, 'dataframe'):
             raise ValueError("Dataframe was not initialized")
         filtered = self.dataframe.loc[flow_ids]
         features, labels = filtered.drop('label', axis=1), filtered['label']
         np_features = features.to_numpy('float32')
         np_labels = labels.to_numpy('uint8')
-        
-        # bool() to binarize and float() since BCELoss is a probability [0,1]
-        # This is assuming label 0 is normal/benign traffic
+
         tensor_features = torch.from_numpy(np_features)
+        # Labels are floats since BCELoss only accepts floats
         tensor_labels = torch.from_numpy(np_labels).bool().float()
         return tensor_features, tensor_labels
 
     def train(self, train_set: tuple[Tensor, Tensor]) -> float:
-        self.model.train()
+        """
+        Trains local model modified by the toml configuration file 
+        (such as continual learning and differential privacy), 
+        updates model, and calculates the average loss.
+        
+        :param train_set: Data from self.get_flow_data() to be trained on.
+        :type train_set: tuple[Tensor, Tensor]
+        :return: Training loss of model.
+        :rtype: float
+        """
+        self.mlp_model.train()
         train_features, train_labels = train_set
         n_new_samples = len(train_labels)
 
         if self.cl_enabled:
-            # Calculate samples to achieve 80:20 ratio
-            # current_samples / (0.8 / 0.2) = 20% of total samples
-            # == (current * 0.2) / 0.8
-            true_ratio = (1 - self.er_mix_ratio) / self.er_mix_ratio
-            ideal_sample_size = int(n_new_samples / true_ratio)
-
-            # Ratio will be off until replay_buffer size >= replay_sample_size
-            if self.replay_buffer and ideal_sample_size:
-                actual_samples = min(len(self.replay_buffer), ideal_sample_size)
-                samples = self.replay_buffer.sample(actual_samples)
+            if samples := self._sample_replay_buffer(n_new_samples):
                 old_features, old_labels = samples
                 train_features = torch.cat((train_features, old_features))
                 train_labels = torch.cat((train_labels, old_labels))
 
         data = TensorDataset(train_features, train_labels)
-        data_loader = DataLoader(data, batch_size=self.batch_size, shuffle=True)
-        model = self.model
-        
-        # Optimizer corresponds per batch, not per sample
-        # iterations = len(data_loader) * self.epochs
-        iterations = len(data_loader) * self.epochs # DP 
-        optimizer, scheduler = self.model.get_optimizer(iterations)
-        running_loss = 0.0
+        data_loader = DataLoader(
+            dataset=data,
+            batch_size=self.batch_size,
+            shuffle=True,
+            pin_memory=True
+        )
+        model: MLP | GradSampleModule = self.mlp_model
+        optimizer = self.mlp_model.get_optimizer()
+        iterations = len(data_loader) * self.epochs
+        scheduler = self.mlp_model.get_scheduler(optimizer, iterations)
 
-        # Reassign for differential privacy
+        # PrivacyEngine objects wrap around the original objects
+        # N forward passes + N backward passes per batch (where N = batch size)
+        # Time is relative to size of dataset to train
         if self.dp_enabled:
             model, optimizer, *_, data_loader = self.privacy_engine.make_private(
-                module=self.model,
+                module=self.mlp_model,
                 optimizer=optimizer,
                 data_loader=data_loader,
-                noise_multiplier=1.0, 
-                max_grad_norm=1.0, # Clipping
-                clipping='flat', # Per individual sample (slow?)
-                poisson_sampling=True # DP sampling method
+                noise_multiplier=self.noise,
+                max_grad_norm=self.clipping, # Clipping
+                clipping='flat', # Individual sampling (flat) is sloww
+                poisson_sampling=True
             )
-            
-        # Training time is around 5 seconds
-        start = time()
+
+        running_loss = 0.0
+        loop_start = time()
         for _ in range(self.epochs):
-            for batch in data_loader:
-                if not len(batch):
-                    print("Empty batch")
+            for batch_features, batch_labels in data_loader:
+                # Poisson sampling could produce empty batch
+                if not batch_labels.nelement():
                     continue
 
-                batch_features, batch_labels = batch
+                batch_features: Tensor = batch_features.to(self.device, non_blocking=True)
+                batch_labels: Tensor = batch_labels.to(self.device, non_blocking=True)
+
                 outputs: Tensor = model(batch_features) # Forward pass
-                outputs = outputs.squeeze(1)
+                outputs = outputs.squeeze(1).to(self.device)
                 loss: Tensor = self.criterion(outputs, batch_labels)
 
                 if self.cl_enabled and self.prev_parameters:
@@ -150,18 +202,18 @@ class Client:
                         nested_term = nested_term.pow(2)
                         penalty = f_i * nested_term
                         ewc_loss += penalty.sum()
-                    loss += self.ewc_half_lambda * ewc_loss
-                
-                loss.backward() # Computes mini-batch SGD
-                optimizer.step() # Update weights using gradient descent
+                    loss += (self.ewc_lambda / 2) * ewc_loss
+
+                loss.backward() # Calculate where to step using mini-batch SGD
+                optimizer.step() # Step forward down gradient
                 scheduler.step() # Adjust learning rate
-                optimizer.zero_grad() # Reset for next batch
-                running_loss += loss.item() * batch_labels.size(0)
-        print(time() - start)
+                # Prevents gradient accumulation for next iteration
+                optimizer.zero_grad()
+                running_loss += loss.item() * len(batch_labels)
+        print(f"{time() - loop_start=}")
 
         if self.dp_enabled:
-            delta = 1e-5
-            epsilon = self.privacy_engine.get_epsilon(delta)
+            self.mlp_model = model.to_standard_module()
 
         total_samples = max(1, len(train_labels))
         avg_loss = running_loss / total_samples
@@ -169,92 +221,125 @@ class Client:
             return avg_loss
 
         self.total_flows += n_new_samples
-        sampler = tuple((feature, label) 
-                        for feature, label in zip(*train_set)
-                        if random.random() <= self.er_sample_rate)
-        if sampler:
-            new_features, new_labels = zip(*sampler)
-            new_features = torch.stack(new_features)
-            new_labels = torch.stack(new_labels)
-            self.replay_buffer.append(new_features, new_labels)
-        
-        # Model has privacy wrapper around it and fisher_information
-        # Find direct access to MLP module.
-        if self.dp_enabled:
-            self._initialize_model(self.context)
-            self.update_model(model._module.state_dict())
+        new_features, new_labels = train_set
+        mask = torch.rand(size=(len(new_labels),)) <= self.er_sample_rate
+        self.replay_buffer.append(new_features[mask], new_labels[mask])
 
         self.fisher_diagonal = self._fisher_information(train_set)
         self.prev_parameters = {
             name: parameter.clone().detach()
-            for name, parameter in self.model.named_parameters()
+            for name, parameter in self.mlp_model.named_parameters()
             if parameter.requires_grad
         }
         return avg_loss
-    
+
+    def _sample_replay_buffer(self, n_new_samples: int) -> Optional[tuple[Tensor, Tensor]]:
+        """
+        Randomly sample from replay buffer to achieve ratio
+        (from configuration file). If ratio is zero or replay buffer is empty,
+        return None.
+
+        :param n_new_samples: Number of samples in the current batch.
+        Used to calculate how many previous samples to retrieve.
+        :type n_new_samples: int
+        :return: Features and labels as tensors or None if empty buffer,
+        samples, or ratio
+        :rtype: tuple[Tensor, Tensor] | None
+        """
+        if not self.er_mix_ratio or not n_new_samples:
+            return None
+        if self.er_mix_ratio >= 1.0:
+            raise ValueError("Experience replay cannot be 100%")
+        # Could also do: (new_samples * 0.2) / 0.8 = 20% of total (mix = 0.2)
+        true_ratio = (1 - self.er_mix_ratio) / self.er_mix_ratio
+        ideal_sample_size = int(n_new_samples / true_ratio)
+        actual_sample_size = min(len(self.replay_buffer), ideal_sample_size)
+        if not actual_sample_size:
+            return None
+        # Ratio will be off until replay buffer size >= replay sample size
+        return self.replay_buffer.sample(actual_sample_size)
+
     def _fisher_information(self, train_set: tuple[Tensor, Tensor]) -> dict[str, Tensor]:
-        self.model.eval()
+        """
+        Calculates the fisher diagonal from the current model
+        and training data.
+        
+        :param train_set: Same features and labels used in training the model.
+        :type train_set: tuple[Tensor, Tensor]
+        :return: Calculated fisher diagonal from modified/trained parameters.
+        :rtype: dict[str, Tensor]
+        """
+        self.mlp_model.eval()
         fisher: dict[str, Tensor] = {
             name: torch.zeros_like(parameter)
-            for name, parameter in self.model.named_parameters()
+            for name, parameter in self.mlp_model.named_parameters()
             if parameter.requires_grad
         }
         data = TensorDataset(*train_set)
         batches = DataLoader(data, batch_size=self.batch_size, shuffle=False)
-        for batch in batches:
-            features, labels = batch
-            self.model.zero_grad()
-            outputs: Tensor = self.model(features)
+        for batch_features, batch_labels  in batches:
+            batch_features: Tensor = batch_features.to(self.device)
+            batch_labels: Tensor = batch_labels.to(self.device)
+
+            self.mlp_model.zero_grad()
+            outputs: Tensor = self.mlp_model(batch_features)
             outputs = outputs.squeeze(1)
-            loss: Tensor = self.criterion(outputs, labels)
+            loss: Tensor = self.criterion(outputs, batch_labels)
             loss.backward()
 
             # Sum of square gradients
             with torch.no_grad():
-                for name, parameter in self.model.named_parameters():
+                for name, parameter in self.mlp_model.named_parameters():
                     if parameter.grad is not None:
                         fisher[name] += parameter.grad.detach().pow(2)
 
-        # Averaging out after total sum calculated
-        n_samples = len(batches)
         for name in fisher:
-            fisher[name] /= n_samples
+            fisher[name] /= len(batches)
         return fisher
-    
+
     def evaluate(self, test_set: tuple[Tensor, Tensor]) -> dict[str, float]:
-        self.model.eval()
+        """
+        Evaluates server aggregated model against the test set.
+        
+        :param test_set: Features and labels to process
+        :type test_set: tuple[Tensor, Tensor]
+        :return: Metrics from scoring the model.
+        :rtype: dict[str, float]
+        """
+        self.mlp_model.eval()
         test_features, test_labels = test_set
         data = TensorDataset(test_features, test_labels)
-        batches = DataLoader(data, batch_size=self.batch_size, shuffle=False)
-        
-        all_predictions, all_probabilities =  [], []
-        correct = 0
-        total_loss = 0.0
-        
-        with torch.no_grad():
-            for batch in batches:
-                features, labels = batch
-                features: Tensor
-                labels: Tensor
-                outputs: Tensor = self.model(features)
-                outputs = outputs.squeeze(1)
-                probabilities = torch.sigmoid(outputs)
-                predictions = (probabilities >= 0.5).long()
-                
-                correct += (predictions == labels).sum().item()
-                batch_loss: Tensor = self.criterion(outputs, labels.float())
-                total_loss += batch_loss.item() * labels.size(0)
+        data_loader = DataLoader(data, batch_size=self.batch_size, shuffle=False)
 
-                all_predictions.extend(predictions.numpy())
-                all_probabilities.extend(probabilities.numpy())
-        
+        all_predictions, all_probabilities =  [], []
+        n_correct: int = 0
+        total_loss: float = 0.0
+
+        with torch.no_grad():
+            for batch_features, batch_labels in data_loader:
+                batch_features: Tensor = batch_features.to(self.device)
+                batch_labels: Tensor = batch_labels.to(self.device)
+
+                outputs: Tensor = self.mlp_model(batch_features)
+                outputs = outputs.squeeze(1)
+                probabilities = torch.sigmoid(outputs) # auto on self.device
+                predictions = (probabilities >= 0.5).float()
+
+                n_batch_correct: Tensor = (predictions == batch_labels).sum()
+                n_correct += int(n_batch_correct.item())
+                batch_loss: Tensor = self.criterion(outputs, batch_labels)
+                total_loss += batch_loss.item() * len(batch_labels)
+
+                all_predictions.extend(predictions.cpu().numpy())
+                all_probabilities.extend(probabilities.cpu().numpy())
+
         all_predictions = np.array(all_predictions)
         all_probabilities = np.array(all_probabilities)
         all_labels = test_labels.numpy()
         total_samples = len(test_set[1])
 
         metrics = {
-            'accuracy': correct / total_samples,
+            'accuracy': n_correct / total_samples,
             'loss': total_loss / total_samples,
             'roc-auc': Losses.roc_auc(all_labels, all_probabilities),
             'pr-auc': Losses.pr_auc(all_labels, all_probabilities),
@@ -263,28 +348,21 @@ class Client:
         }
         return metrics
 
-'''Client object needs to be cached or else each round would have to create
-a new client. Context allows persistence for the process to obtain client'''
-def assign_context(function: Callable):
+def assign_context(function: Callable) -> Callable:
+    """
+    Initialize and cache client to context to maintain persistence.
+    
+    :param function: The client's train/evaluate function
+    :type function: Callable
+    :return: Wrapper that initializes the client.
+    :rtype: Callable[..., Any]
+    """
     def wrapper(msg: Message, context: Context) -> Message:
-        if not hasattr(context, '_client'):
-            client = Client()
-            client.context = context
-            client._initialize_model(context)
-            client.epochs = int(context.run_config['epochs'])
-            client.dp_enabled = bool(context.run_config['dp-enabled'])
-            client.cl_enabled = bool(context.run_config['cl-enabled'])
-            client.ewc_half_lambda = float(context.run_config['ewc-lambda']) / 2
-            client.er_sample_rate = float(context.run_config['er-memory'])
-            client.er_mix_ratio = float(context.run_config['er-alpha'])
-            client.batch_size = int(context.run_config['batch-size'])
-            n_features = int(context.run_config['n-features'])
-            client.replay_buffer = ReplayBuffer(os.getpid(), n_features)
-            context._client = client
-        else:
-            client: Client = context._client
-        client_result: Message = function(client, msg)
-        return client_result
+        context.client: Client = getattr(context, 'client', Client(context))
+        result: Message = function(context.client, msg)
+        if str(context.client.device) == 'cuda':
+            torch.cuda.empty_cache()
+        return result
     return wrapper
 
 app = ClientApp()
@@ -292,6 +370,18 @@ app = ClientApp()
 @app.train()
 @assign_context
 def client_train(client: Client, msg: Message) -> Message:
+    """
+    Initializes dataframe for client, trains, and constructs message to send
+    back to server.
+    
+    :param client: Client object from context.client.
+    :type client: Client
+    :param msg: Message object sent from the server.
+    :type msg: Message
+    :return: Message reply back to the server containing training loss 
+    and trained model parameters.
+    :rtype: Message
+    """
     new_parameters = msg.content['arrays'].to_torch_state_dict()
     client.update_model(new_parameters)
     client.set_dataframe("fed_cl_ids/datasets/UAVIDS-2025 Preprocessed.csv")
@@ -299,14 +389,16 @@ def client_train(client: Client, msg: Message) -> Message:
     train_set = client.get_flow_data(flow_ids)
 
     average_loss = client.train(train_set)
-    client_model_params = ArrayRecord(client.model.state_dict())
+    # state_dict() auto detaches
+    client_params = OrderedDict(client.mlp_model.state_dict())
+    client_array_record = ArrayRecord(client_params)
     metrics = {
         'train_loss': average_loss,
         'num-examples': len(train_set[1])
     }
     metric_record = MetricRecord(metrics)
     content = RecordDict({
-        'arrays': client_model_params, 
+        'arrays': client_array_record,
         'metrics': metric_record
     })
     return Message(content, reply_to=msg)
@@ -314,6 +406,18 @@ def client_train(client: Client, msg: Message) -> Message:
 @app.evaluate()
 @assign_context
 def client_evaluate(client: Client, msg: Message) -> Message:
+    """
+    Initializes dataframe for client, evaluates, and constructs message to send
+    back to server. 
+    
+    :param client: Client object from context.client.
+    :type client: Client
+    :param msg: Message object sent from the server.
+    :type msg: Message
+    :return: Message reply back to the server containing training loss 
+    and trained model parameters.
+    :rtype: Message
+    """
     new_parameters = msg.content['arrays'].to_torch_state_dict()
     client.update_model(new_parameters)
     client.set_dataframe("fed_cl_ids/datasets/UAVIDS-2025 Preprocessed.csv")
