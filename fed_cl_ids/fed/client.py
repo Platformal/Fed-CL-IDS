@@ -228,7 +228,6 @@ class Client:
             self.fisher_diagonal = self._fisher_information(train_set)
             self.prev_parameters = {
                 name: parameter.clone().detach()
-                # Switch to training_model
                 for name, parameter in self.mlp_model.named_parameters()
                 if parameter.requires_grad
             }
