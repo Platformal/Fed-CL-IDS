@@ -145,6 +145,8 @@ class ElasticWeightConsolidation:
         :rtype: dict[str, Tensor]
         """
         model.eval()
+        if not isinstance(model, MLP):
+            raise TypeError("MLP model should be passed")
         new_fisher: dict[str, Tensor] = {
             name: torch.zeros_like(parameter)
             for name, parameter in model.named_parameters()
@@ -173,6 +175,8 @@ class ElasticWeightConsolidation:
         self._fisher_diagonal = new_fisher
 
     def update_prev_parameters(self, model: MLP) -> None:
+        if not isinstance(model, MLP):
+            raise TypeError("MLP model should be passed")
         self._prev_parameters = {
             name: parameter.clone().detach()
             for name, parameter in model.named_parameters()
@@ -180,7 +184,4 @@ class ElasticWeightConsolidation:
         }
 
     def is_empty(self) -> bool:
-        return bool(self._prev_parameters)
-
-    def __bool__(self) -> bool:
-        return bool(self._prev_parameters)
+        return not bool(self._prev_parameters)

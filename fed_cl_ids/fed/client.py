@@ -8,7 +8,6 @@ from collections import OrderedDict
 from dataclasses import dataclass
 from pathlib import Path
 from time import time
-import warnings
 import os
 
 import pandas as pd
@@ -65,9 +64,6 @@ class Client:
             path=MAIN_PATH / 'runtime'
         )
         self.ewc = ElasticWeightConsolidation()
-        # self.prev_parameters: dict[str, Tensor] = {}
-        # self.fisher_diagonal: dict[str, Tensor] = {}
-
         self.dp = DifferentialPrivacy()
         # Get epsilon with train, return with evaluate.
         self.stored_epsilon: Optional[float] = None
