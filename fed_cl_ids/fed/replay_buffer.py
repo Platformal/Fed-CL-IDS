@@ -79,8 +79,8 @@ class ReplayBuffer:
             new_labels[:self._length] = self._labels
 
         # Copy new tensor data
-        new_features[self._length:] = features.detach()
-        new_labels[self._length:] = labels.detach()
+        new_features[self._length:] = features.cpu().detach()
+        new_labels[self._length:] = labels.cpu().detach()
 
         # Write changes in the array to respective .dat file.
         new_features.flush()
