@@ -190,7 +190,7 @@ class Client:
         for _ in range(self.epochs):
             for batch_features, batch_labels in data_loader:
                 batch_features: Tensor
-                batch_labels:Tensor
+                batch_labels: Tensor
                 # Poisson sampling could produce empty batch
                 if not batch_labels.nelement():
                     continue
@@ -318,7 +318,7 @@ class Client:
         self.mlp_model.eval()
         test_features, test_labels = test_set
         data = TensorDataset(test_features, test_labels)
-        data_loader = DataLoader(data, batch_size=self.batch_size, shuffle=False)
+        data_loader = DataLoader(data, batch_size=self.batch_size)
 
         all_predictions, all_probabilities =  [], []
         n_correct: int = 0
@@ -326,7 +326,8 @@ class Client:
 
         with torch.no_grad():
             for batch_features, batch_labels in data_loader:
-
+                batch_features: Tensor
+                batch_labels: Tensor
                 outputs: Tensor = self.mlp_model(batch_features)
                 outputs = outputs.squeeze(1)
                 probabilities = torch.sigmoid(outputs) # auto on self.device

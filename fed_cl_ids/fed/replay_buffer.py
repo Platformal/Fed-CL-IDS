@@ -94,4 +94,4 @@ class ReplayBuffer:
         return self._length
 
     def __bool__(self) -> bool:
-        return bool(len(self))
+        return bool(self._length)

@@ -208,11 +208,7 @@ def get_uavids(server: Server, filepath: Path) -> dict[str, list[int]]:
 
 def log_results(server: Server, result: Result, day: int) -> None:
     """Saves aggregated model as pt file and logs aggregated metrics"""
-    # I assume the resulting arrays are already in cpu. Remove?
-    server.current_parameters = OrderedDict({
-        key: state.cpu()
-        for key, state in result.arrays.to_torch_state_dict().items()
-    })
+    server.current_parameters = result.arrays.to_torch_state_dict()
     torch.save(server.current_parameters, OUTPUT_PATH / f'Day{day}.pt')
     metrics = result.evaluate_metrics_clientapp.popitem()
     with open(OUTPUT_PATH / 'metrics.txt', 'a', encoding='utf-8') as file:
