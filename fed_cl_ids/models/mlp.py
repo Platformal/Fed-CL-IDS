@@ -83,4 +83,3 @@ class MLP(nn.Module):
             T_max=cosine_epochs
         )
         return scheduler
-

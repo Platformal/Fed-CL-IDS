@@ -47,10 +47,10 @@ class Client:
         # Experience replay
         self.er_sample_rate = float(context.run_config['er-memory'])
         self.er_mix_ratio = float(context.run_config['er-mix-ratio'])
-        self.ewc_lambda = float(context.run_config['ewc-lambda'])
         self.total_flows: int = 0
         self.replay_buffer = ReplayBuffer(identifier=os.getpid())
         # Elastic weight consolidation
+        self.ewc_lambda = float(context.run_config['ewc-lambda'])
         self.prev_parameters: dict[str, Tensor] = {}
         self.fisher_diagonal: dict[str, Tensor] = {}
 
@@ -62,6 +62,7 @@ class Client:
         self.privacy_engine = PrivacyEngine(accountant='rdp')
         # Get epsilon with train, return with evaluate.
         self.stored_epsilon: Optional[float] = None
+        self.total_epsilon: float = 0.0
 
         # Data cache (probably will be removed with CIC-IDS)
         self.dataframe: pd.DataFrame
@@ -95,7 +96,7 @@ class Client:
         Load and cache self.dataframe for faster reuse if same csv file.
         
         :param csv_path: Filepath to csv.
-        :type csv_path: str
+        :type csv_path: Path
         """
         if self.dataframe_path is not None and self.dataframe_path == csv_path:
             return
@@ -159,7 +160,7 @@ class Client:
             shuffle=True,
             pin_memory=True
         )
-        model: MLP | GradSampleModule = self.mlp_model
+        training_model: MLP | GradSampleModule = self.mlp_model
         optimizer = self.mlp_model.get_optimizer()
         iterations = len(data_loader) * self.epochs
         scheduler = self.mlp_model.get_scheduler(optimizer, iterations)
@@ -168,7 +169,7 @@ class Client:
         # N forward passes + N backward passes per batch (where N = batch size)
         # Time is relative to size of dataset to train
         if self.dp_enabled:
-            model, optimizer, *_, data_loader = self.privacy_engine.make_private(
+            training_model, optimizer, *_, data_loader = self.privacy_engine.make_private(
                 module=self.mlp_model,
                 optimizer=optimizer,
                 data_loader=data_loader,
@@ -189,14 +190,14 @@ class Client:
                 batch_features: Tensor = batch_features.to(self.device, non_blocking=True)
                 batch_labels: Tensor = batch_labels.to(self.device, non_blocking=True)
 
-                outputs: Tensor = model(batch_features) # Forward pass
+                outputs: Tensor = training_model(batch_features) # Forward pass
                 outputs = outputs.squeeze(1).to(self.device)
                 loss: Tensor = self.criterion(outputs, batch_labels)
 
                 if self.cl_enabled and self.prev_parameters:
                     ewc_loss = 0.0
                     # penalty = (λ/2) * Σ F_i(θ_i - θ*_i)²
-                    for name, parameter in model.named_parameters():
+                    for name, parameter in training_model.named_parameters():
                         # Private model has different prev_params
                         if name not in self.prev_parameters:
                             continue
@@ -216,20 +217,21 @@ class Client:
         print(f"{time() - loop_start=}")
 
         if self.dp_enabled:
-            self.mlp_model = model.to_standard_module()
-
-            self.fisher_diagonal = self._fisher_information(train_set)
-            self.prev_parameters = {
-                name: parameter.clone().detach()
-                for name, parameter in self.mlp_model.named_parameters()
-                if parameter.requires_grad
-            }
+            self.mlp_model = training_model.to_standard_module()
 
         if self.cl_enabled:
             self.total_flows += n_new_samples
             new_features, new_labels = train_set
             mask = torch.rand(size=(len(new_labels),)) <= self.er_sample_rate
             self.replay_buffer.append(new_features[mask], new_labels[mask])
+
+            self.fisher_diagonal = self._fisher_information(train_set)
+            self.prev_parameters = {
+                name: parameter.clone().detach()
+                # Switch to training_model
+                for name, parameter in self.mlp_model.named_parameters()
+                if parameter.requires_grad
+            }
 
         total_samples = max(1, len(train_labels))
         avg_loss = running_loss / total_samples
