@@ -5,6 +5,7 @@ its parameters from the server module.
 """
 from typing import Callable, Optional
 from collections import OrderedDict
+from dataclasses import dataclass
 from pathlib import Path
 from time import time
 import warnings
@@ -16,14 +17,13 @@ import numpy as np
 from flwr.app import ArrayRecord, Context, Message, MetricRecord, RecordDict
 from flwr.clientapp import ClientApp
 
+from opacus.grad_sample.grad_sample_module import GradSampleModule
 from torch.utils.data import DataLoader, TensorDataset
 from torch import Tensor
 import torch
 
-from opacus.grad_sample.grad_sample_module import GradSampleModule
-from opacus import PrivacyEngine
-
 from fed_cl_ids.fed.replay_buffer import ReplayBuffer
+from fed_cl_ids.fed.differential_privacy import DifferentialPrivacy
 from fed_cl_ids.models.losses import Losses
 from fed_cl_ids.models.mlp import MLP
 
@@ -32,36 +32,41 @@ warnings.filterwarnings('ignore')
 
 MAIN_PATH = Path().cwd() / 'fed_cl_ids'
 
-class Client:
-    """Acts as an interactive instance of a client."""
+@dataclass()
+class ClientConfiguration:
+    """Stores configurations from pyproject.toml"""
     def __init__(self, context: Context) -> None:
         device_str = 'cuda' if torch.cuda.is_available() else 'cpu'
         self.device = torch.device(device_str)
-        self.mlp_model: MLP = self._initialize_model(context)
         self.epochs = int(context.run_config['epochs'])
         self.batch_size = int(context.run_config['batch-size'])
-        self.criterion = torch.nn.BCEWithLogitsLoss() # Automatically on device
-        self._context = context
 
-        self.cl_enabled = bool(context.run_config['cl-enabled'])
         # Experience replay
+        self.cl_enabled = bool(context.run_config['cl-enabled'])
         self.er_sample_rate = float(context.run_config['er-memory'])
         self.er_mix_ratio = float(context.run_config['er-mix-ratio'])
-        self.replay_buffer = ReplayBuffer(identifier=os.getpid())
-        # Elastic weight consolidation
         self.ewc_lambda = float(context.run_config['ewc-lambda'])
-        self.prev_parameters: dict[str, Tensor] = {}
-        self.fisher_diagonal: dict[str, Tensor] = {}
 
         # Differential privacy
         self.dp_enabled = bool(context.run_config['dp-enabled'])
         self.clipping = float(context.run_config['clipping'])
         self.noise = float(context.run_config['noise'])
         self.delta = float(context.run_config['delta'])
-        self.privacy_engine = PrivacyEngine(accountant='rdp')
+
+class Client:
+    """Acts as an interactive instance of a client."""
+    def __init__(self, context: Context) -> None:
+        self.config = ClientConfiguration(context)
+        self.model: MLP = self._initialize_model(context)
+        self.criterion = torch.nn.BCEWithLogitsLoss() # Automatically on device
+
+        self.replay_buffer = ReplayBuffer(identifier=os.getpid())
+        self.prev_parameters: dict[str, Tensor] = {}
+        self.fisher_diagonal: dict[str, Tensor] = {}
+
+        self.dp = DifferentialPrivacy()
         # Get epsilon with train, return with evaluate.
         self.stored_epsilon: Optional[float] = None
-        self.total_epsilon: float = 0.0
 
         # Data cache (probably will be removed with CIC-IDS)
         self.dataframe: pd.DataFrame
@@ -77,7 +82,7 @@ class Client:
             lr_max=float(context.run_config['mlp-lr-max']),
             lr_min=float(context.run_config['mlp-lr-min'])
         )
-        return model.to(self.device)
+        return model.to(self.config.device)
 
     def update_model(self, parameters: dict[str, Tensor]) -> None:
         """
@@ -87,8 +92,8 @@ class Client:
         :param parameters: Keys of parameters and weights with their tensors.
         :type parameters: dict[str, Tensor]
         """
-        self.mlp_model.load_state_dict(parameters)
-        self.mlp_model = self.mlp_model.to(self.device)
+        self.model.load_state_dict(parameters)
+        self.model = self.model.to(self.config.device)
 
     def set_dataframe(self, csv_path: Path) -> None:
         """
@@ -106,7 +111,7 @@ class Client:
     def get_flow_data(self, flow_ids: list[int]) -> tuple[Tensor, Tensor]:
         """
         Uses self.dataframe to transform table of features and label into
-        tensors on self.device.
+        tensors on self.config.device.
 
         Assumes label column is called 'label'.
         
@@ -127,13 +132,13 @@ class Client:
         np_features = features.to_numpy('float32')
         np_labels = labels.to_numpy('uint8')
 
-        tensor_features = torch.from_numpy(np_features).to(self.device)
+        tensor_features = torch.from_numpy(np_features).to(self.config.device)
         # Labels are floats since BCELoss only accepts floats
         tensor_labels = (
             torch.from_numpy(np_labels)
             .bool()
             .float()
-            .to(self.device)
+            .to(self.config.device)
         )
         return tensor_features, tensor_labels
 
@@ -148,46 +153,44 @@ class Client:
         :return: Training loss of model.
         :rtype: float
         """
-        self.mlp_model.train()
+        self.model.train()
         train_features, train_labels = train_set
         n_new_samples = len(train_labels)
 
-        if self.cl_enabled:
+        if self.config.cl_enabled:
             if samples := self._sample_replay_buffer(n_new_samples):
                 old_features, old_labels = samples
-                old_features = old_features.to(self.device)
-                old_labels = old_labels.to(self.device)
+                old_features = old_features.to(self.config.device)
+                old_labels = old_labels.to(self.config.device)
                 train_features = torch.cat((train_features, old_features))
                 train_labels = torch.cat((train_labels, old_labels))
 
         data = TensorDataset(train_features, train_labels)
         data_loader = DataLoader(
             dataset=data,
-            batch_size=self.batch_size,
+            batch_size=self.config.batch_size,
             shuffle=True,
         )
-        training_model: MLP | GradSampleModule = self.mlp_model
-        optimizer = self.mlp_model.get_optimizer()
-        iterations = len(data_loader) * self.epochs
-        scheduler = self.mlp_model.get_scheduler(optimizer, iterations)
+        training_model: MLP | GradSampleModule = self.model
+        optimizer = self.model.get_optimizer()
+        iterations = len(data_loader) * self.config.epochs
+        scheduler = self.model.get_scheduler(optimizer, iterations)
 
         # PrivacyEngine objects wrap around the original objects
         # N forward passes + N backward passes per batch (where N = batch size)
         # Time is relative to size of dataset to train
-        if self.dp_enabled:
-            training_model, optimizer, *_, data_loader = self.privacy_engine.make_private(
-                module=self.mlp_model,
+        if self.config.dp_enabled:
+            training_model, optimizer, *_, data_loader = self.dp.make_private(
+                module=self.model,
                 optimizer=optimizer,
                 data_loader=data_loader,
-                noise_multiplier=self.noise,
-                max_grad_norm=self.clipping, # Clipping
-                clipping='flat', # Individual sampling (flat) is sloww
-                poisson_sampling=True
+                noise_multiplier=self.config.noise,
+                max_grad_norm=self.config.clipping, # Clipping
             )
 
         running_loss = 0.0
         loop_start = time()
-        for _ in range(self.epochs):
+        for _ in range(self.config.epochs):
             for batch_features, batch_labels in data_loader:
                 batch_features: Tensor
                 batch_labels: Tensor
@@ -199,20 +202,20 @@ class Client:
                 outputs = outputs.squeeze(1)
                 loss: Tensor = self.criterion(outputs, batch_labels)
 
-                if self.cl_enabled and self.prev_parameters:
+                if self.config.cl_enabled and self.prev_parameters:
                     ewc_loss = 0.0
                     # penalty = (λ/2) * Σ F_i(θ_i - θ*_i)²
                     for name, parameter in training_model.named_parameters():
-                        name = name.removeprefix("_module.")
                         # Private model has different prev_params
+                        name = name.removeprefix("_module.")
                         if name not in self.prev_parameters:
-                            continue
+                            continue # Never triggered
                         f_i = self.fisher_diagonal[name]
                         nested_term = parameter - self.prev_parameters[name]
                         nested_term = nested_term.pow(2)
                         penalty = f_i * nested_term
                         ewc_loss += penalty.sum()
-                    loss += (self.ewc_lambda / 2) * ewc_loss
+                    loss += (self.config.ewc_lambda / 2) * ewc_loss
 
                 loss.backward() # Calculate where to step using mini-batch SGD
                 optimizer.step() # Step forward down gradient
@@ -222,19 +225,19 @@ class Client:
                 running_loss += loss.item() * len(batch_labels)
         print(f"{time() - loop_start=}")
 
-        if self.dp_enabled:
-            self.mlp_model = training_model.to_standard_module()
+        if self.config.dp_enabled:
+            self.model = training_model.to_standard_module()
 
-        if self.cl_enabled:
+        if self.config.cl_enabled:
             new_features, new_labels = train_set
-            rng_values = torch.rand(size=(len(new_labels),), device=self.device)
-            mask = rng_values <= self.er_sample_rate
+            rng_values = torch.rand(size=(len(new_labels),), device=self.config.device)
+            mask = rng_values <= self.config.er_sample_rate
             self.replay_buffer.append(new_features[mask], new_labels[mask])
 
             self.fisher_diagonal = self._fisher_information(train_set)
             self.prev_parameters = {
                 name: parameter.clone().detach()
-                for name, parameter in self.mlp_model.named_parameters()
+                for name, parameter in self.model.named_parameters()
                 if parameter.requires_grad
             }
 
@@ -255,12 +258,12 @@ class Client:
         samples, or ratio
         :rtype: tuple[Tensor, Tensor] | None
         """
-        if not self.er_mix_ratio or not n_new_samples:
+        if not self.config.er_mix_ratio or not n_new_samples:
             return None
-        if self.er_mix_ratio >= 1.0:
+        if self.config.er_mix_ratio >= 1.0:
             raise ValueError("Experience replay cannot be 100%")
         # Could also do: (new_samples * 0.2) / 0.8 = 20% of total (mix = 0.2)
-        true_ratio = (1 - self.er_mix_ratio) / self.er_mix_ratio
+        true_ratio = (1 - self.config.er_mix_ratio) / self.config.er_mix_ratio
         ideal_sample_size = int(n_new_samples / true_ratio)
         actual_sample_size = min(len(self.replay_buffer), ideal_sample_size)
         if not actual_sample_size:
@@ -278,27 +281,27 @@ class Client:
         :return: Calculated fisher diagonal from modified/trained parameters.
         :rtype: dict[str, Tensor]
         """
-        self.mlp_model.eval()
+        self.model.eval()
         fisher: dict[str, Tensor] = {
             name: torch.zeros_like(parameter)
-            for name, parameter in self.mlp_model.named_parameters()
+            for name, parameter in self.model.named_parameters()
             if parameter.requires_grad
         }
         data = TensorDataset(*train_set)
-        batches = DataLoader(data, batch_size=self.batch_size, shuffle=False)
+        batches = DataLoader(data, batch_size=self.config.batch_size)
         for batch_features, batch_labels in batches:
             batch_features: Tensor = batch_features
             batch_labels: Tensor = batch_labels
 
-            self.mlp_model.zero_grad()
-            outputs: Tensor = self.mlp_model(batch_features)
+            self.model.zero_grad()
+            outputs: Tensor = self.model(batch_features)
             outputs = outputs.squeeze(1)
             loss: Tensor = self.criterion(outputs, batch_labels)
             loss.backward()
 
             # Sum of square gradients
             with torch.no_grad():
-                for name, parameter in self.mlp_model.named_parameters():
+                for name, parameter in self.model.named_parameters():
                     if parameter.grad is not None:
                         fisher[name] += parameter.grad.detach().pow(2)
 
@@ -315,10 +318,10 @@ class Client:
         :return: Metrics from scoring the model.
         :rtype: dict[str, float]
         """
-        self.mlp_model.eval()
+        self.model.eval()
         test_features, test_labels = test_set
         data = TensorDataset(test_features, test_labels)
-        data_loader = DataLoader(data, batch_size=self.batch_size)
+        data_loader = DataLoader(data, batch_size=self.config.batch_size)
 
         all_predictions, all_probabilities =  [], []
         n_correct: int = 0
@@ -328,9 +331,9 @@ class Client:
             for batch_features, batch_labels in data_loader:
                 batch_features: Tensor
                 batch_labels: Tensor
-                outputs: Tensor = self.mlp_model(batch_features)
+                outputs: Tensor = self.model(batch_features)
                 outputs = outputs.squeeze(1)
-                probabilities = torch.sigmoid(outputs) # auto on self.device
+                probabilities = torch.sigmoid(outputs) # auto on self.config.device
                 predictions = (probabilities >= 0.5).float()
 
                 n_batch_correct: Tensor = (predictions == batch_labels).sum()
@@ -396,7 +399,7 @@ def client_train(client: Client, msg: Message) -> Message:
 
     average_loss = client.train(train_set)
     # state_dict() auto detaches
-    client_params = OrderedDict(client.mlp_model.state_dict())
+    client_params = OrderedDict(client.model.state_dict())
     client_array_record = ArrayRecord(client_params)
     metrics = {
         'train_loss': average_loss,

@@ -1,8 +1,8 @@
 """Module for continual learning replay buffer."""
 from pathlib import Path
+from torch import Tensor
 import numpy as np
 import torch
-from torch import Tensor
 
 class ReplayBuffer:
     """Maps the replay buffer to disk as a numpy memory-mapped array 
