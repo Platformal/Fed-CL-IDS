@@ -22,13 +22,13 @@ from torch.utils.data import DataLoader, TensorDataset
 from torch import Tensor
 import torch
 
-from fed_cl_ids.fed.replay_buffer import ReplayBuffer
+from fed_cl_ids.fed.continual_learning import (
+    ReplayBuffer,
+    ElasticWeightConsolidation
+)
 from fed_cl_ids.fed.differential_privacy import DifferentialPrivacy
 from fed_cl_ids.models.losses import Losses
 from fed_cl_ids.models.mlp import MLP
-
-# Privacy Engine
-warnings.filterwarnings('ignore')
 
 MAIN_PATH = Path().cwd() / 'fed_cl_ids'
 
@@ -60,9 +60,13 @@ class Client:
         self.model: MLP = self._initialize_model(context)
         self.criterion = torch.nn.BCEWithLogitsLoss() # Automatically on device
 
-        self.replay_buffer = ReplayBuffer(identifier=os.getpid())
-        self.prev_parameters: dict[str, Tensor] = {}
-        self.fisher_diagonal: dict[str, Tensor] = {}
+        self.replay_buffer = ReplayBuffer(
+            identifier=os.getpid(),
+            path=MAIN_PATH / 'runtime'
+        )
+        self.ewc = ElasticWeightConsolidation()
+        # self.prev_parameters: dict[str, Tensor] = {}
+        # self.fisher_diagonal: dict[str, Tensor] = {}
 
         self.dp = DifferentialPrivacy()
         # Get epsilon with train, return with evaluate.
@@ -202,20 +206,12 @@ class Client:
                 outputs = outputs.squeeze(1)
                 loss: Tensor = self.criterion(outputs, batch_labels)
 
-                if self.config.cl_enabled and self.prev_parameters:
-                    ewc_loss = 0.0
-                    # penalty = (λ/2) * Σ F_i(θ_i - θ*_i)²
-                    for name, parameter in training_model.named_parameters():
-                        # Private model has different prev_params
-                        name = name.removeprefix("_module.")
-                        if name not in self.prev_parameters:
-                            continue # Never triggered
-                        f_i = self.fisher_diagonal[name]
-                        nested_term = parameter - self.prev_parameters[name]
-                        nested_term = nested_term.pow(2)
-                        penalty = f_i * nested_term
-                        ewc_loss += penalty.sum()
-                    loss += (self.config.ewc_lambda / 2) * ewc_loss
+                if self.config.cl_enabled and not self.ewc.is_empty():
+                    minibatch_penalty = self.ewc.calculate_penalty(
+                        model=training_model,
+                        lambda_penalty=self.config.ewc_lambda
+                    )
+                    loss += minibatch_penalty
 
                 loss.backward() # Calculate where to step using mini-batch SGD
                 optimizer.step() # Step forward down gradient
@@ -234,12 +230,13 @@ class Client:
             mask = rng_values <= self.config.er_sample_rate
             self.replay_buffer.append(new_features[mask], new_labels[mask])
 
-            self.fisher_diagonal = self._fisher_information(train_set)
-            self.prev_parameters = {
-                name: parameter.clone().detach()
-                for name, parameter in self.model.named_parameters()
-                if parameter.requires_grad
-            }
+            self.ewc.update_fisher_information(
+                model=self.model,
+                train_set=train_set,
+                criterion=self.criterion,
+                batch_size=self.config.batch_size
+            )
+            self.ewc.update_prev_parameters(self.model)
 
         total_samples = max(1, len(train_labels))
         avg_loss = running_loss / total_samples
@@ -270,44 +267,6 @@ class Client:
             return None
         # Ratio will be off until replay buffer size >= replay sample size
         return self.replay_buffer.sample(actual_sample_size)
-
-    def _fisher_information(self, train_set: tuple[Tensor, Tensor]) -> dict[str, Tensor]:
-        """
-        Calculates the fisher diagonal from the current model
-        and training data.
-        
-        :param train_set: Same features and labels used in training the model.
-        :type train_set: tuple[Tensor, Tensor]
-        :return: Calculated fisher diagonal from modified/trained parameters.
-        :rtype: dict[str, Tensor]
-        """
-        self.model.eval()
-        fisher: dict[str, Tensor] = {
-            name: torch.zeros_like(parameter)
-            for name, parameter in self.model.named_parameters()
-            if parameter.requires_grad
-        }
-        data = TensorDataset(*train_set)
-        batches = DataLoader(data, batch_size=self.config.batch_size)
-        for batch_features, batch_labels in batches:
-            batch_features: Tensor = batch_features
-            batch_labels: Tensor = batch_labels
-
-            self.model.zero_grad()
-            outputs: Tensor = self.model(batch_features)
-            outputs = outputs.squeeze(1)
-            loss: Tensor = self.criterion(outputs, batch_labels)
-            loss.backward()
-
-            # Sum of square gradients
-            with torch.no_grad():
-                for name, parameter in self.model.named_parameters():
-                    if parameter.grad is not None:
-                        fisher[name] += parameter.grad.detach().pow(2)
-
-        for name in fisher:
-            fisher[name] /= len(batches)
-        return fisher
 
     def evaluate(self, test_set: tuple[Tensor, Tensor]) -> dict[str, float]:
         """

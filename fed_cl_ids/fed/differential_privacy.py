@@ -1,5 +1,8 @@
 """Extension of Opacus' Privacy Engine to get epsilon per round."""
+import warnings
 from opacus import PrivacyEngine
+
+warnings.filterwarnings('ignore')
 
 class DifferentialPrivacy(PrivacyEngine):
     def __init__(
