@@ -1,5 +1,6 @@
 """Module for continual learning using experience replay and
 elastic weight consolidation."""
+from typing import Literal, Optional
 from pathlib import Path
 
 from opacus.grad_sample.grad_sample_module import GradSampleModule
@@ -68,36 +69,40 @@ class ReplayBuffer:
             return
         new_length = self._length + len(labels)
         writing_mode = 'r+' if self._length else 'w+'
-
-        new_features = np.memmap(
-            self.features_path,
-            dtype=self.dtype,
-            mode=writing_mode,
-            shape=(new_length, features.shape[1])
+        self._features = self._copy_to_new_memmap(
+            path=self.features_path,
+            writing_mode=writing_mode,
+            new_shape=(new_length, features.shape[1]),
+            old_data=getattr(self, '_features', None),
+            new_data=features
         )
-        new_labels = np.memmap(
-            self.labels_path,
-            dtype=self.dtype,
-            mode=writing_mode,
-            shape=(new_length,)
+        self._labels = self._copy_to_new_memmap(
+            path=self.labels_path,
+            writing_mode=writing_mode,
+            new_shape=(new_length,),
+            old_data=getattr(self, '_labels', None),
+            new_data=labels
         )
-
-        # Copy old tensor data
-        if self._length:
-            new_features[:self._length] = self._features
-            new_labels[:self._length] = self._labels
-
-        # Copy new tensor data
-        new_features[self._length:] = features.cpu().detach()
-        new_labels[self._length:] = labels.cpu().detach()
-
-        # Write changes in the array to respective .dat file.
-        new_features.flush()
-        new_labels.flush()
-
-        self._features = new_features
-        self._labels = new_labels
         self._length = new_length
+
+    def _copy_to_new_memmap(
+            self,
+            path: Path,
+            writing_mode: Literal['r+', 'w+'],
+            new_shape: tuple,
+            old_data: Optional[np.memmap],
+            new_data: Tensor) -> np.memmap:
+        new_memmap = np.memmap(
+            filename=path,
+            dtype=self.dtype,
+            mode=writing_mode,
+            shape=new_shape
+        )
+        if old_data is not None:
+            new_memmap[:self._length] = old_data
+        new_memmap[self._length:] = new_data.cpu().detach()
+        new_memmap.flush() # Updates .dat file with new memmap
+        return new_memmap
 
     def __len__(self) -> int:
         return self._length

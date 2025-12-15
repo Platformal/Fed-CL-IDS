@@ -14,7 +14,6 @@ class DifferentialPrivacy(PrivacyEngine):
 
     def get_epsilon(self, delta: float) -> float:
         """Return how much epsilon was used at delta."""
-        return super().get_epsilon(delta)
         total_epsilon = super().get_epsilon(delta)
         epsilon_used = total_epsilon - self.previous_epsilon
         self.previous_epsilon = total_epsilon

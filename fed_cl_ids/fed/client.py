@@ -123,7 +123,7 @@ class Client:
         features and labels from.
         :type flow_ids: list[int]
         :return: Tuple containing the features (2D) and the labels (1D).
-        :rtype: tuple[Tensor, Tensor]
+        :rtype: tuple[Tensor, Tensor]s
         """
         if not hasattr(self, 'dataframe'):
             raise ValueError("Dataframe was not initialized")
@@ -224,10 +224,9 @@ class Client:
 
         if self.config.dp_enabled:
             self.model = training_model.to_standard_module()
-            if self.stored_epsilon is not None:
-                raise TypeError("Epsilon is supposed to be None when training.")
-            print(self.dp.get_epsilon(self.config.delta))
-            
+            # if self.stored_epsilon is not None:
+                # raise TypeError("Epsilon is supposed to be None when training.")
+            self.stored_epsilon = self.dp.get_epsilon(self.config.delta)
 
         if self.config.cl_enabled:
             new_features, new_labels = train_set
