@@ -133,7 +133,6 @@ class Client:
         np_labels = labels.to_numpy('uint8')
 
         tensor_features = torch.from_numpy(np_features).to(self.config.device)
-        # Labels are floats since BCELoss only accepts floats
         tensor_labels = (
             torch.from_numpy(np_labels)
             .bool()
@@ -189,6 +188,8 @@ class Client:
             )
 
         running_loss = 0.0
+        # Counting samples per batch > len(train_labels) if dp_enabled.
+        total_samples = 0
         loop_start = time()
         for _ in range(self.config.epochs):
             for batch_features, batch_labels in data_loader:
@@ -203,26 +204,37 @@ class Client:
                 loss: Tensor = self.criterion(outputs, batch_labels)
 
                 if self.config.cl_enabled and not self.ewc.is_empty():
-                    minibatch_penalty = self.ewc.calculate_penalty(
+                    batch_fisher_penalty = self.ewc.calculate_penalty(
                         model=training_model,
-                        lambda_penalty=self.config.ewc_lambda
+                        lambda_penalty=self.config.ewc_lambda,
+                        device=self.config.device
                     )
-                    loss += minibatch_penalty
+                    loss += batch_fisher_penalty
 
                 loss.backward() # Calculate where to step using mini-batch SGD
                 optimizer.step() # Step forward down gradient
                 scheduler.step() # Adjust learning rate
                 # Prevents gradient accumulation for next iteration
                 optimizer.zero_grad()
-                running_loss += loss.item() * len(batch_labels)
-        print(f"{time() - loop_start=}")
+
+                batch_size = len(batch_labels)
+                running_loss += loss.item() * batch_size
+                total_samples += batch_size
+        print(f"Training Loop: {time() - loop_start} sec")
 
         if self.config.dp_enabled:
             self.model = training_model.to_standard_module()
+            if self.stored_epsilon is not None:
+                raise TypeError("Epsilon is supposed to be None when training.")
+            print(self.dp.get_epsilon(self.config.delta))
+            
 
         if self.config.cl_enabled:
             new_features, new_labels = train_set
-            rng_values = torch.rand(size=(len(new_labels),), device=self.config.device)
+            rng_values = torch.rand(
+                size=(len(new_labels),), 
+                device=self.config.device
+            )
             mask = rng_values <= self.config.er_sample_rate
             self.replay_buffer.append(new_features[mask], new_labels[mask])
 
@@ -230,12 +242,12 @@ class Client:
                 model=self.model,
                 train_set=train_set,
                 criterion=self.criterion,
-                batch_size=self.config.batch_size
+                batch_size=self.config.batch_size,
+                device=self.config.device
             )
             self.ewc.update_prev_parameters(self.model)
 
-        total_samples = max(1, len(train_labels))
-        avg_loss = running_loss / total_samples
+        avg_loss = running_loss / max(1, total_samples)
         return avg_loss
 
     def _sample_replay_buffer(self, n_new_samples: int) -> Optional[tuple[Tensor, Tensor]]:
@@ -303,7 +315,6 @@ class Client:
         all_probabilities = np.array(all_probabilities)
         all_labels = test_labels.cpu().numpy()
         total_samples = len(test_set[1])
-
         metrics = {
             'accuracy': n_correct / total_samples,
             'loss': total_loss / total_samples,

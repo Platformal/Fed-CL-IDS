@@ -105,6 +105,7 @@ class ReplayBuffer:
     def __bool__(self) -> bool:
         return bool(self._length)
 
+
 class ElasticWeightConsolidation:
     def __init__(self) -> None:
         self._prev_parameters: dict[str, Tensor] = {}
@@ -113,28 +114,29 @@ class ElasticWeightConsolidation:
     def calculate_penalty(
             self,
             model: MLP | GradSampleModule,
-            lambda_penalty: int | float) -> Tensor:
+            lambda_penalty: int | float,
+            device: torch.device) -> Tensor:
         # Penalty = (λ/2) * Σ F_i(θ_i - θ*_i)²
-        # Since minibatch, we multiply by (λ/2) for each sum item
-        ewc_loss = torch.tensor(0.0)
+        sum_loss = torch.tensor(0.0, device=device)
         for name, parameter in model.named_parameters():
             # Private model prepends _module. to each param name
             name = name.removeprefix("_module.")
             if name not in self._prev_parameters:
+                print("Parameter not in prev_parameters")
                 continue # Never triggered
             f_i = self._fisher_diagonal[name]
-            nested_term = parameter - self._prev_parameters[name]
-            nested_term = nested_term.pow(2)
-            penalty = f_i * nested_term
-            ewc_loss += penalty.sum()
-        return (lambda_penalty / 2) * ewc_loss
+            theta_star = self._prev_parameters[name]
+            penalty_i = f_i * (parameter - theta_star).pow(2)
+            sum_loss += penalty_i.sum()
+        return lambda_penalty * 0.5 * sum_loss
 
     def update_fisher_information(
             self,
             model: MLP,
             train_set: tuple[Tensor, Tensor],
             criterion: BCEWithLogitsLoss,
-            batch_size: int) -> None:
+            batch_size: int,
+            device: torch.device) -> None:
         """
         Calculates the fisher diagonal from the current model
         and training data.
@@ -147,13 +149,16 @@ class ElasticWeightConsolidation:
         model.eval()
         if not isinstance(model, MLP):
             raise TypeError("MLP model should be passed")
+
         new_fisher: dict[str, Tensor] = {
-            name: torch.zeros_like(parameter)
+            name: torch.zeros_like(parameter, device=device)
             for name, parameter in model.named_parameters()
             if parameter.requires_grad
         }
+
         data = TensorDataset(*train_set)
         batches = DataLoader(data, batch_size=batch_size)
+
         for batch_features, batch_labels in batches:
             batch_features: Tensor = batch_features
             batch_labels: Tensor = batch_labels
@@ -167,12 +172,20 @@ class ElasticWeightConsolidation:
             # Sum of square gradients
             with torch.no_grad():
                 for name, parameter in model.named_parameters():
-                    if parameter.grad is not None:
-                        new_fisher[name] += parameter.grad.detach().pow(2)
+                    if parameter.grad is None:
+                        continue
+                    square_gradients = parameter.grad.detach().pow(2)
+                    new_fisher[name] += square_gradients * len(batch_labels)
 
+        total_samples = len(train_set[1]) # Should equal samples in dataloader
         for name in new_fisher:
-            new_fisher[name] /= len(batches)
-        self._fisher_diagonal = new_fisher
+            new_fisher[name] /= total_samples
+
+        if not self._fisher_diagonal:
+            self._fisher_diagonal = new_fisher
+            return
+        for name, parameter in new_fisher.items():
+            self._fisher_diagonal[name] += parameter
 
     def update_prev_parameters(self, model: MLP) -> None:
         if not isinstance(model, MLP):
