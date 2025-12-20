@@ -17,6 +17,7 @@ from flwr.app import ArrayRecord, Context, Message, MetricRecord, RecordDict
 from flwr.clientapp import ClientApp
 
 from opacus.grad_sample.grad_sample_module import GradSampleModule
+from opacus.optimizers.optimizer import DPOptimizer
 from torch.utils.data import DataLoader, TensorDataset
 from torch import Tensor
 import torch
@@ -26,8 +27,8 @@ from fed_cl_ids.fed.continual_learning import (
     ElasticWeightConsolidation
 )
 from fed_cl_ids.fed.differential_privacy import DifferentialPrivacy
+from fed_cl_ids.models.mlp import MLP, Adam, CosineAnnealingLR
 from fed_cl_ids.models.losses import Losses
-from fed_cl_ids.models.mlp import MLP
 
 MAIN_PATH = Path().cwd() / 'fed_cl_ids'
 
@@ -164,9 +165,8 @@ class Client:
                 train_features = torch.cat((train_features, old_features))
                 train_labels = torch.cat((train_labels, old_labels))
 
-        data = TensorDataset(train_features, train_labels)
         data_loader = DataLoader(
-            dataset=data,
+            dataset=TensorDataset(train_features, train_labels),
             batch_size=self.config.batch_size,
             shuffle=True,
         )
@@ -187,51 +187,30 @@ class Client:
                 max_grad_norm=self.config.clipping, # Clipping
             )
 
-        running_loss = 0.0
-        # Counting samples per batch > len(train_labels) if dp_enabled.
+        total_loss = 0.0
         total_samples = 0
         loop_start = time()
         for _ in range(self.config.epochs):
-            for batch_features, batch_labels in data_loader:
-                batch_features: Tensor
-                batch_labels: Tensor
-                # Poisson sampling could produce empty batch
-                if not batch_labels.nelement():
-                    continue
-
-                outputs: Tensor = training_model(batch_features) # Forward pass
-                outputs = outputs.squeeze(1)
-                loss: Tensor = self.criterion(outputs, batch_labels)
-
-                if self.config.cl_enabled and not self.ewc.is_empty():
-                    batch_fisher_penalty = self.ewc.calculate_penalty(
-                        model=training_model,
-                        lambda_penalty=self.config.ewc_lambda,
-                        device=self.config.device
-                    )
-                    loss += batch_fisher_penalty
-
-                loss.backward() # Calculate where to step using mini-batch SGD
-                optimizer.step() # Step forward down gradient
-                scheduler.step() # Adjust learning rate
-                # Prevents gradient accumulation for next iteration
-                optimizer.zero_grad()
-
-                batch_size = len(batch_labels)
-                running_loss += loss.item() * batch_size
-                total_samples += batch_size
+            loss, n_samples = self._train_iteration(
+                model=training_model,
+                optimizer=optimizer,
+                scheduler=scheduler,
+                data_loader=data_loader
+            )
+            total_loss += loss
+            total_samples += n_samples
         print(f"Training Loop: {time() - loop_start} sec")
 
         if self.config.dp_enabled:
             self.model = training_model.to_standard_module()
-            # if self.stored_epsilon is not None:
-                # raise TypeError("Epsilon is supposed to be None when training.")
+            if self.stored_epsilon is not None:
+                raise TypeError("Epsilon needs to be empty by training.")
             self.stored_epsilon = self.dp.get_epsilon(self.config.delta)
 
         if self.config.cl_enabled:
             new_features, new_labels = train_set
             rng_values = torch.rand(
-                size=(len(new_labels),), 
+                size=(len(new_labels),),
                 device=self.config.device
             )
             mask = rng_values <= self.config.er_sample_rate
@@ -246,8 +225,46 @@ class Client:
             )
             self.ewc.update_prev_parameters(self.model)
 
-        avg_loss = running_loss / max(1, total_samples)
-        return avg_loss
+        average_loss = total_loss / max(1, total_samples)
+        return average_loss
+
+    def _train_iteration(
+            self,
+            model: MLP | GradSampleModule,
+            optimizer: Adam | DPOptimizer,
+            scheduler: CosineAnnealingLR,
+            data_loader: DataLoader) -> tuple[float, int]:
+        sum_loss: float = 0.0
+        n_samples: int = 0
+        for batch_features, batch_labels in data_loader:
+            batch_features: Tensor
+            batch_labels: Tensor
+            # Poisson sampling could produce empty batch
+            if not batch_labels.nelement():
+                continue
+
+            outputs: Tensor = model(batch_features) # Forward pass
+            outputs = outputs.squeeze(1)
+            loss: Tensor = self.criterion(outputs, batch_labels)
+
+            if self.config.cl_enabled and not self.ewc.is_empty():
+                batch_fisher_penalty = self.ewc.calculate_penalty(
+                    model=model,
+                    lambda_penalty=self.config.ewc_lambda,
+                    device=self.config.device
+                )
+                loss += batch_fisher_penalty
+
+            loss.backward() # Calculate where to step using mini-batch SGD
+            optimizer.step() # Step forward down gradient
+            scheduler.step() # Adjust learning rate
+            # Prevents gradient accumulation for next iteration
+            optimizer.zero_grad()
+
+            batch_size = len(batch_labels)
+            sum_loss += loss.item() * batch_size
+            n_samples += batch_size
+        return sum_loss, n_samples
 
     def _sample_replay_buffer(self, n_new_samples: int) -> Optional[tuple[Tensor, Tensor]]:
         """
@@ -320,8 +337,10 @@ class Client:
             'roc-auc': Losses.roc_auc(all_labels, all_probabilities),
             'pr-auc': Losses.pr_auc(all_labels, all_probabilities),
             'macro-f1': Losses.macro_f1(all_labels, all_predictions),
-            'recall@fpr=1%': Losses.recall_at_fpr(all_labels, all_probabilities, 0.01)
+            'recall@fpr=1%': Losses.recall_at_fpr(all_labels, all_probabilities, 0.01),
+            'epsilon':  -1 if self.stored_epsilon is None else self.stored_epsilon
         }
+        self.stored_epsilon = None
         return metrics
 
 def assign_context(function: Callable) -> Callable:

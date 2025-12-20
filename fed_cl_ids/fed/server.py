@@ -32,7 +32,7 @@ class ServerConfiguration:
     def __init__(self, grid: Grid, context: Context) -> None:
         self.fraction_train = float(context.run_config['fraction-train'])
         self.fraction_evaluate = float(context.run_config['fraction-evaluate'])
-        self.total_clients = len(tuple(grid.get_node_ids()))
+        self.total_clients = len(list(grid.get_node_ids()))
         self.n_train_clients = int(self.total_clients * self.fraction_train)
         self.n_evaluate_clients = int(self.total_clients * self.fraction_evaluate)
 
@@ -106,7 +106,7 @@ class Server:
         return splits
 
     @staticmethod
-    def distribute_flows(flows: Iterable[int], n_clients: int) -> tuple[list[int], ...]:
+    def distribute_flows(flows: Iterable[int], n_clients: int) -> list[list[int], ...]:
         """
         Hash each flow by ID and assign to a bucket for each client.
         
@@ -115,9 +115,9 @@ class Server:
         :param n_clients: Number of clients to create buckets.
         :type n_clients: int
         :return: List of integers for each client to process.
-        :rtype: tuple[list[int], ...]
+        :rtype: list[list[int], ...]
         """
-        clients = tuple([] for _ in range(n_clients))
+        clients = list([] for _ in range(n_clients))
         for flow_id in flows:
             id_bytes = str(flow_id).encode()
             id_hex = hashlib.sha256(id_bytes).hexdigest()
@@ -210,10 +210,15 @@ def log_results(server: Server, result: Result, day: int) -> None:
     """Saves aggregated model as pt file and logs aggregated metrics"""
     server.current_parameters = result.arrays.to_torch_state_dict()
     torch.save(server.current_parameters, OUTPUT_PATH / f'Day{day}.pt')
-    metrics = result.evaluate_metrics_clientapp.popitem()
+    sum_epsilon_day = sum(
+        round_metric['epsilon']
+        for round_metric in result.evaluate_metrics_clientapp.values()
+    )
+    n_rounds, metrics = result.evaluate_metrics_clientapp.popitem()
     with open(OUTPUT_PATH / 'metrics.txt', 'a', encoding='utf-8') as file:
         file.write(
-            f"Day {day}: "
-            f"{server.config.n_train_clients}/{server.config.total_clients} "
-            f"clients: {str(metrics)}\n"
+            f"Day {day} | "
+            f"{server.config.n_train_clients}/{server.config.total_clients} clients: "
+            f"{{Rounds: {n_rounds} | Cumulative Epsilon: {sum_epsilon_day}}} "
+            f"{str(metrics)}\n"
         )

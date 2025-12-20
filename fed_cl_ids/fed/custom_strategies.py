@@ -1,27 +1,31 @@
+from collections.abc import Iterable
+from typing import Callable, Optional
+from logging import INFO
+import json
+import time
+import io
+
 from flwr.common import ArrayRecord, ConfigRecord, MetricRecord
 from flwr.common import RecordDict, Message, MessageType, log
 from flwr.serverapp.strategy.strategy_utils import sample_nodes
 from flwr.serverapp.strategy import FedAvg, Result
 from flwr.server import Grid
-from logging import INFO
 
-from collections.abc import Iterable
-from typing import Callable, Optional
 from torch import Tensor
 import torch
-import time
-import io
-import json
 
 class UAVIDSFedAvg(FedAvg):
-    def __init__(self, fraction_train: float, fraction_eval: float) -> None:
+    def __init__(
+            self,
+            fraction_train: float,
+            fraction_eval: float) -> None:
         super().__init__(fraction_train, fraction_eval)
         self.train_node_ids: list[int] = []
         self.evaluate_node_ids: list[int] = []
         self.all_node_ids: list[int] = []
         device_str = 'cuda' if torch.cuda.is_available() else 'cpu'
         self.device = torch.device(device_str)
-    
+
     # Changed sample_nodes function only to initialize
     def configure_train(
         self, server_round: int, arrays: ArrayRecord, 
@@ -55,6 +59,41 @@ class UAVIDSFedAvg(FedAvg):
             client_content['config']['flows'] = flows[i]
             message.content = client_content
         return messages
+
+    def average_evaluate_metrics(self, records: list[RecordDict],
+                                 weighting_metric_name: str) -> MetricRecord:
+        """Perform weighted aggregation all MetricRecords using a specific key."""
+        aggregated_metrics = MetricRecord()
+        for record in records:
+            for record_item in record.metric_records.values():
+                # aggregate in-place
+                for key, value in record_item.items(): # accuracy, loss, pr-auc
+                    # We exclude the weighting key from the aggregated MetricRecord
+                    if key == weighting_metric_name:
+                        continue
+                    if key == 'epsilon' and value < 0:
+                        continue
+                    if key not in aggregated_metrics:
+                        aggregated_metrics[key] = [value]
+                    else:
+                        aggregated_metrics[key].append(value)
+        for key, values_list in aggregated_metrics.items():
+            aggregated_metrics[key] = sum(values_list) / len(values_list)
+        return aggregated_metrics
+
+    def aggregate_evaluate(
+        self,
+        server_round: int,
+        replies: Iterable[Message]) -> Optional[MetricRecord]:
+        """Aggregate MetricRecords in the received Messages."""
+        valid_replies, _ = self._check_and_log_replies(replies, is_train=False)
+
+        metrics = None
+        if valid_replies:
+            reply_contents = [msg.content for msg in valid_replies]
+            # Aggregate MetricRecords
+            metrics = self.average_evaluate_metrics(reply_contents, self.weighted_by_key)
+        return metrics
 
     def configure_evaluate(
         self, server_round: int, arrays: ArrayRecord, config: ConfigRecord, grid: Grid
@@ -161,7 +200,7 @@ class UAVIDSFedAvg(FedAvg):
         for current_round in range(1, num_rounds + 1):
             log(INFO, "")
             log(INFO, "[DAY %s | ROUND %s/%s]", current_day, current_round, num_rounds)
-            
+
             # -----------------------------------------------------------------
             # --- TRAINING (CLIENTAPP-SIDE) -----------------------------------
             # -----------------------------------------------------------------
@@ -240,7 +279,7 @@ class UAVIDSFedAvg(FedAvg):
         log(INFO, "")
 
         return result
-    
+
     def aggregate_train(
         self,
         server_round: int,
@@ -250,7 +289,7 @@ class UAVIDSFedAvg(FedAvg):
         valid_replies, _ = self._check_and_log_replies(replies, is_train=True)
         if not valid_replies:
             return None, None
-        
+
         reply_contents = [msg.content for msg in valid_replies]
         arrays: list[dict[str, Tensor]] = [
             content[self.arrayrecord_key].to_torch_state_dict() 
