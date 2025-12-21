@@ -5,8 +5,10 @@ import json
 import time
 import io
 
-from flwr.common import ArrayRecord, ConfigRecord, MetricRecord
-from flwr.common import RecordDict, Message, MessageType, log
+from flwr.common import (
+    ArrayRecord, ConfigRecord, MetricRecord,
+    RecordDict, Message, MessageType, log
+)
 from flwr.serverapp.strategy.strategy_utils import sample_nodes
 from flwr.serverapp.strategy import FedAvg, Result
 from flwr.server import Grid
@@ -60,8 +62,10 @@ class UAVIDSFedAvg(FedAvg):
             message.content = client_content
         return messages
 
-    def average_evaluate_metrics(self, records: list[RecordDict],
-                                 weighting_metric_name: str) -> MetricRecord:
+    def average_evaluate_metrics(
+            self,
+            records: list[RecordDict],
+            weighting_metric_name: str) -> MetricRecord:
         """Perform weighted aggregation all MetricRecords using a specific key."""
         aggregated_metrics = MetricRecord()
         for record in records:
@@ -69,16 +73,15 @@ class UAVIDSFedAvg(FedAvg):
                 # aggregate in-place
                 for key, value in record_item.items(): # accuracy, loss, pr-auc
                     # We exclude the weighting key from the aggregated MetricRecord
-                    if key == weighting_metric_name:
+                    if (key == weighting_metric_name
+                        or (key == 'epsilon' and value < 0)):
                         continue
-                    if key == 'epsilon' and value < 0:
-                        continue
-                    if key not in aggregated_metrics:
-                        aggregated_metrics[key] = [value]
-                    else:
-                        aggregated_metrics[key].append(value)
+                    values_list = aggregated_metrics.get(key, [])
+                    values_list.append(value)
+                    aggregated_metrics[key] = values_list
         for key, values_list in aggregated_metrics.items():
             aggregated_metrics[key] = sum(values_list) / len(values_list)
+        aggregated_metrics['epsilon'] = aggregated_metrics.get('epsilon', -1)
         return aggregated_metrics
 
     def aggregate_evaluate(

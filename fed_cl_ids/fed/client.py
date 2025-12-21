@@ -66,7 +66,7 @@ class Client:
         )
         self.ewc = ElasticWeightConsolidation()
         self.dp = DifferentialPrivacy()
-        # Get epsilon with train, return with evaluate.
+        # Only training nodes can fetch epsilon.
         self.stored_epsilon: Optional[float] = None
 
         # Data cache (probably will be removed with CIC-IDS)
@@ -338,7 +338,7 @@ class Client:
             'pr-auc': Losses.pr_auc(all_labels, all_probabilities),
             'macro-f1': Losses.macro_f1(all_labels, all_predictions),
             'recall@fpr=1%': Losses.recall_at_fpr(all_labels, all_probabilities, 0.01),
-            'epsilon':  -1 if self.stored_epsilon is None else self.stored_epsilon
+            'epsilon': -1 if self.stored_epsilon is None else self.stored_epsilon
         }
         self.stored_epsilon = None
         return metrics

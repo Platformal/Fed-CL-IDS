@@ -7,10 +7,10 @@ import hashlib
 import json
 import time
 
+import pandas as pd
 from torch import Tensor
 import torch
 import yaml
-import pandas as pd
 
 from flwr.app import ArrayRecord, ConfigRecord, Context
 from flwr.serverapp.strategy import Result
@@ -39,6 +39,8 @@ class ServerConfiguration:
         self.n_days = int(context.run_config['max-days'])
         self.n_rounds = int(context.run_config['n-rounds'])
 
+        self.dp_enabled = bool(context.run_config['dp-enabled'])
+
 class Server:
     """Main class holding configurations, main model parameters, 
     and federated aggregation method."""
@@ -49,7 +51,7 @@ class Server:
             fraction_eval=self.config.fraction_evaluate,
         )
         self.current_parameters = self._initial_parameters(context)
-
+        self.total_epsilon = 0.0 if self.config.dp_enabled else None
         self.dataframe: pd.DataFrame
         self.dataframe_path: Optional[Path] = None
 
@@ -160,24 +162,19 @@ def main(grid: Grid, context: Context) -> None:
             flows=evaluate_flows,
             n_clients=server.config.n_evaluate_clients
         )
-
-        # UAVIDSFedAvg will split flows to each client
-        train_config = ConfigRecord({'flows': json.dumps(train_flows)})
-        evaluate_config = ConfigRecord({'flows': json.dumps(evaluate_flows)})
-
         result = server.federated_model.start(
             grid=grid,
             initial_arrays=ArrayRecord(server.current_parameters),
             current_day=day,
             num_rounds=server.config.n_rounds,
-            train_config=train_config,
-            evaluate_config=evaluate_config,
+            train_config=ConfigRecord({'flows': json.dumps(train_flows)}),
+            evaluate_config=ConfigRecord({'flows': json.dumps(evaluate_flows)}),
         )
         log_results(server, result, day)
+    print(time.time() - start)
     with (OUTPUT_PATH / 'metrics.txt').open('a', encoding='utf-8') as file:
         file.write('\n')
     clear_directory(RUNTIME_PATH)
-    print(time.time() - start)
 
 def clear_directory(filepath: Path) -> None:
     """
@@ -210,15 +207,20 @@ def log_results(server: Server, result: Result, day: int) -> None:
     """Saves aggregated model as pt file and logs aggregated metrics"""
     server.current_parameters = result.arrays.to_torch_state_dict()
     torch.save(server.current_parameters, OUTPUT_PATH / f'Day{day}.pt')
-    sum_epsilon_day = sum(
-        round_metric['epsilon']
-        for round_metric in result.evaluate_metrics_clientapp.values()
-    )
+    sum_epsilon_day: Optional[float] = None
+    if server.config.dp_enabled:
+        sum_epsilon_day = sum(
+            round_metric['epsilon']
+            for round_metric in result.evaluate_metrics_clientapp.values()
+        )
+        server.total_epsilon += sum_epsilon_day
     n_rounds, metrics = result.evaluate_metrics_clientapp.popitem()
     with (OUTPUT_PATH / 'metrics.txt').open('a', encoding='utf-8') as file:
         file.write(
-            f"Day {day} | "
-            f"{server.config.n_train_clients}/{server.config.total_clients} clients: "
-            f"{{Rounds: {n_rounds} | Cumulative Epsilon: {sum_epsilon_day}}} "
-            f"{str(metrics)}\n"
+            f"Day {day}"
+            f" | {server.config.n_train_clients}/{server.config.total_clients} train"
+            f" | Rounds: {n_rounds}"
+            f" | Day Epsilon: {sum_epsilon_day}"
+            f" | Total Epsilon: {server.total_epsilon}"
+            f" | {str(metrics)}\n"
         )
