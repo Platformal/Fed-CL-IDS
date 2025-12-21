@@ -138,10 +138,10 @@ def main(grid: Grid, context: Context) -> None:
     :type context: Context
     """
 
-    try:
-        RUNTIME_PATH.mkdir()
-    except FileExistsError:
+    if RUNTIME_PATH.exists():
         clear_directory(RUNTIME_PATH)
+    else:
+        RUNTIME_PATH.mkdir(exist_ok=True)
 
     server = Server(grid, context)
     uavids_days = get_uavids(server, UAVIDS_DAYS_PATH)
@@ -174,7 +174,7 @@ def main(grid: Grid, context: Context) -> None:
             evaluate_config=evaluate_config,
         )
         log_results(server, result, day)
-    with open(OUTPUT_PATH / 'metrics.txt', 'a', encoding='utf-8') as file:
+    with (OUTPUT_PATH / 'metrics.txt').open('a', encoding='utf-8') as file:
         file.write('\n')
     clear_directory(RUNTIME_PATH)
     print(time.time() - start)
@@ -200,7 +200,7 @@ def get_uavids(server: Server, filepath: Path) -> dict[str, list[int]]:
     :return: Contains day as a str and all the flow IDs
     :rtype: dict[str, list[int]]
     """
-    with open(filepath, encoding='utf-8') as file:
+    with filepath.open(encoding='utf-8') as file:
         raw_days: dict[str, list[int]] = yaml.safe_load(file)
     # Assuming dict is sorted/ordered by days
     filtered_days = tuple(raw_days.items())[:server.config.n_days]
@@ -215,7 +215,7 @@ def log_results(server: Server, result: Result, day: int) -> None:
         for round_metric in result.evaluate_metrics_clientapp.values()
     )
     n_rounds, metrics = result.evaluate_metrics_clientapp.popitem()
-    with open(OUTPUT_PATH / 'metrics.txt', 'a', encoding='utf-8') as file:
+    with (OUTPUT_PATH / 'metrics.txt').open('a', encoding='utf-8') as file:
         file.write(
             f"Day {day} | "
             f"{server.config.n_train_clients}/{server.config.total_clients} clients: "
