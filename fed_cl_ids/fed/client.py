@@ -22,10 +22,7 @@ from torch.utils.data import DataLoader, TensorDataset
 from torch import Tensor
 import torch
 
-from fed_cl_ids.fed.continual_learning import (
-    ReplayBuffer,
-    ElasticWeightConsolidation
-)
+from fed_cl_ids.fed.continual_learning import ContinualLearning
 from fed_cl_ids.fed.differential_privacy import DifferentialPrivacy
 from fed_cl_ids.models.mlp import MLP, Adam, CosineAnnealingLR
 from fed_cl_ids.models.losses import Losses
@@ -60,11 +57,10 @@ class Client:
         self.model: MLP = self._initialize_model(context)
         self.criterion = torch.nn.BCEWithLogitsLoss() # Automatically on device
 
-        self.replay_buffer = ReplayBuffer(
-            identifier=os.getpid(),
-            path=MAIN_PATH / 'runtime'
+        self.cl = ContinualLearning(
+            er_filepath_identifier=os.getpid(),
+            er_runtime_directory=MAIN_PATH / 'runtime'
         )
-        self.ewc = ElasticWeightConsolidation()
         self.dp = DifferentialPrivacy()
         # Only training nodes can fetch epsilon.
         self.stored_epsilon: Optional[float] = None
@@ -155,15 +151,14 @@ class Client:
         """
         self.model.train()
         train_features, train_labels = train_set
-        n_new_samples = len(train_labels)
 
         if self.config.cl_enabled:
-            if samples := self._sample_replay_buffer(n_new_samples):
-                old_features, old_labels = samples
-                old_features = old_features.to(self.config.device)
-                old_labels = old_labels.to(self.config.device)
-                train_features = torch.cat((train_features, old_features))
-                train_labels = torch.cat((train_labels, old_labels))
+            train_features, train_labels = self.cl.er.sample_replay_buffer(
+                original_dataset=train_set,
+                n_new_samples=len(train_labels),
+                ratio_old_samples=self.config.er_mix_ratio,
+                device=self.config.device
+            )
 
         data_loader = DataLoader(
             dataset=TensorDataset(train_features, train_labels),
@@ -202,22 +197,20 @@ class Client:
             self.stored_epsilon = self.dp.get_epsilon(self.config.delta)
 
         if self.config.cl_enabled:
-            new_features, new_labels = train_set
-            rng_values = torch.rand(
-                size=(len(new_labels),),
+            self.cl.er.add_data(
+                original_dataset=train_set,
+                sample_rate=self.config.er_sample_rate,
                 device=self.config.device
             )
-            mask = rng_values <= self.config.er_sample_rate
-            self.replay_buffer.append(new_features[mask], new_labels[mask])
 
-            self.ewc.update_fisher_information(
+            self.cl.ewc.update_fisher_information(
                 model=self.model,
                 train_set=train_set,
                 criterion=self.criterion,
                 batch_size=self.config.batch_size,
                 device=self.config.device
             )
-            self.ewc.update_prev_parameters(self.model)
+            self.cl.ewc.update_prev_parameters(self.model)
 
         average_loss = total_loss / max(1, total_samples)
         return average_loss
@@ -227,7 +220,8 @@ class Client:
             model: MLP | GradSampleModule,
             optimizer: Adam | DPOptimizer,
             scheduler: CosineAnnealingLR,
-            data_loader: DataLoader) -> tuple[float, int]:
+            data_loader: DataLoader
+    ) -> tuple[float, int]:
         sum_loss: float = 0.0
         n_samples: int = 0
         for batch_features, batch_labels in data_loader:
@@ -241,8 +235,8 @@ class Client:
             outputs = outputs.squeeze(1)
             loss: Tensor = self.criterion(outputs, batch_labels)
 
-            if self.config.cl_enabled and not self.ewc.is_empty():
-                batch_fisher_penalty = self.ewc.calculate_penalty(
+            if self.config.cl_enabled and not self.cl.ewc.is_empty():
+                batch_fisher_penalty = self.cl.ewc.calculate_penalty(
                     model=model,
                     lambda_penalty=self.config.ewc_lambda,
                     device=self.config.device
@@ -260,32 +254,6 @@ class Client:
             n_samples += batch_size
         return sum_loss, n_samples
 
-    def _sample_replay_buffer(self, n_new_samples: int) -> Optional[tuple[Tensor, Tensor]]:
-        """
-        Randomly sample from replay buffer to achieve ratio
-        (from configuration file). If ratio is zero or replay buffer is empty,
-        return None.
-
-        :param n_new_samples: Number of samples in the current batch.
-        Used to calculate how many previous samples to retrieve.
-        :type n_new_samples: int
-        :return: Features and labels as tensors or None if empty buffer,
-        samples, or ratio
-        :rtype: tuple[Tensor, Tensor] | None
-        """
-        if not self.config.er_mix_ratio or not n_new_samples:
-            return None
-        if self.config.er_mix_ratio >= 1.0:
-            raise ValueError("Experience replay cannot be 100%")
-        # Could also do: (new_samples * 0.2) / 0.8 = 20% of total (mix = 0.2)
-        true_ratio = (1 - self.config.er_mix_ratio) / self.config.er_mix_ratio
-        ideal_sample_size = int(n_new_samples / true_ratio)
-        actual_sample_size = min(len(self.replay_buffer), ideal_sample_size)
-        if not actual_sample_size:
-            return None
-        # Ratio will be off until replay buffer size >= replay sample size
-        return self.replay_buffer.sample(actual_sample_size)
-
     def evaluate(self, test_set: tuple[Tensor, Tensor]) -> dict[str, float]:
         """
         Evaluates server aggregated model against the test set.
@@ -296,9 +264,8 @@ class Client:
         :rtype: dict[str, float]
         """
         self.model.eval()
-        test_features, test_labels = test_set
         data_loader = DataLoader(
-            dataset=TensorDataset(test_features, test_labels),
+            dataset=TensorDataset(*test_set),
             batch_size=self.config.batch_size
         )
         evaluation_model, _, data_loader = self._create_model_packages(
@@ -314,6 +281,7 @@ class Client:
             for batch_features, batch_labels in data_loader:
                 batch_features: Tensor
                 batch_labels: Tensor
+
                 outputs: Tensor = evaluation_model(batch_features)
                 outputs = outputs.squeeze(1)
                 probabilities = torch.sigmoid(outputs) # auto on self.config.device

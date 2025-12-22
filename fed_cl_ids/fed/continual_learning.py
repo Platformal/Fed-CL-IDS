@@ -12,9 +12,84 @@ import numpy as np
 
 from fed_cl_ids.models.mlp import MLP
 
+class ContinualLearning:
+    """Container for both experience replay and elastic weight consolidation"""
+    def __init__(
+            self,
+            er_filepath_identifier: int | str,
+            er_runtime_directory: Path
+    ) -> None:
+        self.ewc = ElasticWeightConsolidation()
+        self.er = ExperienceReplay(
+            filepath_identifier=er_filepath_identifier,
+            runtime_directory=er_runtime_directory
+        )
+
+class ExperienceReplay:
+    def __init__(
+            self,
+            filepath_identifier: int | str,
+            runtime_directory: Path
+    ) -> None:
+        self._buffer = ReplayBuffer(
+            identifier=filepath_identifier,
+            path=runtime_directory
+        )
+
+    def sample_replay_buffer(
+            self,
+            original_dataset: tuple[Tensor, Tensor],
+            n_new_samples: int,
+            ratio_old_samples: float,
+            device: torch.device
+    ) -> tuple[Tensor, Tensor]:
+        if not ratio_old_samples or not n_new_samples:
+            return original_dataset
+        if ratio_old_samples >= 1.00:
+            raise ValueError("Experience replay cannot be >= 100%")
+        # Could also do: (new_samples * 0.2) / 0.8 = 20% of total (mix = 0.2)
+        true_ratio = (1 - ratio_old_samples) / ratio_old_samples
+        ideal_size = int(n_new_samples / true_ratio)
+        if not (actual_size := min(len(self._buffer), ideal_size)):
+            return original_dataset
+        # Ratio will be off until replay buffer size >= replay sample size
+        np_dataset = self._buffer.sample(actual_size)
+        return self._concat_samples(original_dataset, np_dataset, device)
+
+    def _concat_samples(
+            self,
+            original_dataset: tuple[Tensor, Tensor],
+            np_dataset: tuple[np.ndarray, np.ndarray],
+            device: torch.device
+    ) -> tuple[Tensor, Tensor]:
+        np_features, np_labels = np_dataset
+        new_features = torch.from_numpy(np_features).to(device)
+        new_labels = torch.from_numpy(np_labels).to(device)
+        original_features, original_labels = original_dataset
+        concat_features = torch.cat((original_features, new_features))
+        concat_labels = torch.cat((original_labels, new_labels))
+        return concat_features, concat_labels
+
+    def add_data(
+            self,
+            original_dataset: tuple[Tensor, Tensor],
+            sample_rate: float,
+            device: torch.device
+    ) -> None:
+        features, labels = original_dataset
+        rng_values = torch.rand(
+            size=(len(labels),),
+            device=device
+        )
+        bool_mask = rng_values <= sample_rate
+        selected_features = features[bool_mask].cpu().detach()
+        selected_labels = labels[bool_mask].cpu().detach()
+        self._buffer.append(selected_features, selected_labels)
+
 class ReplayBuffer:
     """Maps the replay buffer to disk as a numpy memory-mapped array 
-    (essentially a ndarray).
+    (essentially a ndarray). All operations using replay buffer is respective
+    to numpy and its arrays.
     
     The runtime folder should be cleared every run to prevent file name 
     conflicts."""
@@ -22,7 +97,8 @@ class ReplayBuffer:
             self,
             identifier: int | str,
             path: Path,
-            np_dtype: str = 'float32') -> None:
+            np_dtype: str = 'float32'
+    ) -> None:
         self.dtype = np_dtype
         self._length: int = 0
 
@@ -35,7 +111,7 @@ class ReplayBuffer:
         self._features: np.memmap
         self._labels: np.memmap
 
-    def sample(self, n_samples: int) -> tuple[Tensor, Tensor]:
+    def sample(self, n_samples: int) -> tuple[np.ndarray, np.ndarray]:
         """
         Randomly samples from buffer for tensors.
         
@@ -50,10 +126,10 @@ class ReplayBuffer:
         if n_samples > self._length:
             raise ValueError("Sample size larger than replay buffer size.")
 
-        sample_indices = np.random.choice(self._length, n_samples, replace=False)
-        features = torch.from_numpy(self._features[sample_indices].copy())
-        labels = torch.from_numpy(self._labels[sample_indices].copy())
-        return features, labels
+        indices = np.random.choice(self._length, n_samples, replace=False)
+        np_features = self._features[indices].copy()
+        np_labels = self._labels[indices].copy()
+        return np_features, np_labels
 
     def append(self, features: Tensor, labels: Tensor) -> None:
         """
@@ -91,7 +167,8 @@ class ReplayBuffer:
             writing_mode: Literal['r+', 'w+'],
             new_shape: tuple,
             old_data: Optional[np.memmap],
-            new_data: Tensor) -> np.memmap:
+            new_data: np.ndarray | Tensor
+    ) -> np.memmap:
         new_memmap = np.memmap(
             filename=path,
             dtype=self.dtype,
@@ -100,7 +177,7 @@ class ReplayBuffer:
         )
         if old_data is not None:
             new_memmap[:self._length] = old_data
-        new_memmap[self._length:] = new_data.cpu().detach()
+        new_memmap[self._length:] = new_data
         new_memmap.flush() # Updates .dat file with new memmap
         return new_memmap
 
@@ -120,7 +197,8 @@ class ElasticWeightConsolidation:
             self,
             model: MLP | GradSampleModule,
             lambda_penalty: int | float,
-            device: torch.device) -> Tensor:
+            device: torch.device
+    ) -> Tensor:
         # Penalty = (λ/2) * Σ F_i(θ_i - θ*_i)²
         sum_loss = torch.tensor(0.0, device=device)
         for name, parameter in model.named_parameters():
@@ -161,12 +239,14 @@ class ElasticWeightConsolidation:
             if parameter.requires_grad
         }
 
-        data = TensorDataset(*train_set)
-        batches = DataLoader(data, batch_size=batch_size)
+        data_loader = DataLoader(
+            dataset=TensorDataset(*train_set),
+            batch_size=batch_size
+        )
 
-        for batch_features, batch_labels in batches:
-            batch_features: Tensor = batch_features
-            batch_labels: Tensor = batch_labels
+        for batch_features, batch_labels in data_loader:
+            batch_features: Tensor
+            batch_labels: Tensor
 
             model.zero_grad()
             outputs: Tensor = model(batch_features)
