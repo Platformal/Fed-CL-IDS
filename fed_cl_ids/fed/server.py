@@ -49,6 +49,7 @@ class Server:
         self.federated_model = UAVIDSFedAvg(
             fraction_train=self.config.fraction_train,
             fraction_eval=self.config.fraction_evaluate,
+            num_rounds=self.config.n_rounds
         )
         self.current_parameters = self._initial_parameters(context)
         self.total_epsilon = 0.0 if self.config.dp_enabled else None
@@ -147,6 +148,7 @@ def main(grid: Grid, context: Context) -> None:
 
     server = Server(grid, context)
     uavids_days = get_uavids(server, UAVIDS_DAYS_PATH)
+    daily_metric_logs = []
 
     start = time.time()
     for day, raw_flows in enumerate(uavids_days.values(), 1):
@@ -166,10 +168,11 @@ def main(grid: Grid, context: Context) -> None:
             grid=grid,
             initial_arrays=ArrayRecord(server.current_parameters),
             current_day=day,
-            num_rounds=server.config.n_rounds,
             train_config=ConfigRecord({'flows': json.dumps(train_flows)}),
             evaluate_config=ConfigRecord({'flows': json.dumps(evaluate_flows)}),
         )
+        rounds_eval_metrics = list(result.evaluate_metrics_clientapp.values())
+        daily_metric_logs.append(rounds_eval_metrics)
         log_results(server, result, day)
     print(time.time() - start)
     with (OUTPUT_PATH / 'metrics.txt').open('a', encoding='utf-8') as file:
@@ -188,7 +191,7 @@ def clear_directory(filepath: Path) -> None:
 
 def get_uavids(server: Server, filepath: Path) -> dict[str, list[int]]:
     """
-    Opens form yaml file, and filters days from configuration file
+    Opens form yaml file, and filters days from configuration file.
     
     :param server:
     :type server: Server
@@ -207,6 +210,7 @@ def log_results(server: Server, result: Result, day: int) -> None:
     """Saves aggregated model as pt file and logs aggregated metrics"""
     server.current_parameters = result.arrays.to_torch_state_dict()
     torch.save(server.current_parameters, OUTPUT_PATH / f'Day{day}.pt')
+
     sum_epsilon_day: Optional[float] = None
     if server.config.dp_enabled:
         sum_epsilon_day = sum(
@@ -214,6 +218,7 @@ def log_results(server: Server, result: Result, day: int) -> None:
             for round_metric in result.evaluate_metrics_clientapp.values()
         )
         server.total_epsilon += sum_epsilon_day
+
     n_rounds, metrics = result.evaluate_metrics_clientapp.popitem()
     with (OUTPUT_PATH / 'metrics.txt').open('a', encoding='utf-8') as file:
         file.write(

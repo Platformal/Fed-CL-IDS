@@ -20,11 +20,14 @@ class UAVIDSFedAvg(FedAvg):
     def __init__(
             self,
             fraction_train: float,
-            fraction_eval: float) -> None:
+            fraction_eval: float,
+            num_rounds: int
+    ) -> None:
         super().__init__(fraction_train, fraction_eval)
         self.train_node_ids: list[int] = []
         self.evaluate_node_ids: list[int] = []
         self.all_node_ids: list[int] = []
+        self.num_rounds = num_rounds
         device_str = 'cuda' if torch.cuda.is_available() else 'cpu'
         self.device = torch.device(device_str)
 
@@ -43,8 +46,8 @@ class UAVIDSFedAvg(FedAvg):
             self.train_node_ids = node_ids
         log(
             INFO,
-            f"configure_train: Sampled {len(self.train_node_ids)} nodes "
-            f"(out of {len(self.all_node_ids)})"
+            "configure_train: Sampled %s nodes (out of %s)",
+            len(self.train_node_ids), len(self.all_node_ids)
         )
         config['server-round'] = server_round
 
@@ -138,7 +141,6 @@ class UAVIDSFedAvg(FedAvg):
         grid: Grid,
         initial_arrays: ArrayRecord,
         current_day: int,
-        num_rounds: int,
         timeout: float = 3600,
         train_config: Optional[ConfigRecord] = None,
         evaluate_config: Optional[ConfigRecord] = None,
@@ -181,7 +183,7 @@ class UAVIDSFedAvg(FedAvg):
         """
         log(INFO, "Starting %s strategy:", self.__class__.__name__)
         log_strategy_start_info(
-            num_rounds, initial_arrays, train_config, evaluate_config
+            self.num_rounds, initial_arrays, train_config, evaluate_config
         )
         self.summary()
         log(INFO, "")
@@ -200,9 +202,9 @@ class UAVIDSFedAvg(FedAvg):
                 result.evaluate_metrics_serverapp[0] = res
 
         current_array = initial_arrays
-        for current_round in range(1, num_rounds + 1):
+        for current_round in range(1, self.num_rounds + 1):
             log(INFO, "")
-            log(INFO, "[DAY %s | ROUND %s/%s]", current_day, current_round, num_rounds)
+            log(INFO, "[DAY %s | ROUND %s/%s]", current_day, current_round, self.num_rounds)
 
             # -----------------------------------------------------------------
             # --- TRAINING (CLIENTAPP-SIDE) -----------------------------------
@@ -322,10 +324,11 @@ def str_config(config: ConfigRecord) -> str:
     """Ensures start log does not print all elements in flows"""
     all_config_str: list[str] = []
     for key, value in config.items():
+        # Poorly written I know...
         try:
             value = json.loads(value)
         except:
-            value = value
+            pass
         if isinstance(value, bytes):
             string = f"'{key}': '<bytes>'"
         elif isinstance(value, list):

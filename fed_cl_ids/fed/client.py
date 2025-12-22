@@ -84,7 +84,7 @@ class Client:
     def update_model(self, parameters: dict[str, Tensor]) -> None:
         """
         Load a given MLP module's parameters into client's model.
-        Equivalent to using load_state_dict().
+        Equivalent to using mlp.load_state_dict().
         
         :param parameters: Keys of parameters and weights with their tensors.
         :type parameters: dict[str, Tensor]
@@ -176,8 +176,8 @@ class Client:
             cosine_epochs=len(data_loader) * self.config.epochs
         )
 
-        total_loss = 0.0
-        total_samples = 0
+        total_loss: float = 0.0
+        total_samples: int = 0
         loop_start = time()
         for _ in range(self.config.epochs):
             loss, n_samples = self._train_iteration(

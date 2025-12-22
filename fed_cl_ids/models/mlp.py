@@ -33,7 +33,7 @@ class MLP(nn.Module):
             layers.extend((
                 nn.Linear(prev_dimension, width), # Hidden layer
                 nn.LayerNorm(width),
-                nn.ReLU(),
+                nn.GELU(),
                 nn.Dropout(self.dropout)
             ))
             prev_dimension = width
