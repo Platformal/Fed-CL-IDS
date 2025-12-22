@@ -170,22 +170,16 @@ class Client:
             batch_size=self.config.batch_size,
             shuffle=True,
         )
-        training_model: MLP | GradSampleModule = self.model
-        optimizer = self.model.get_optimizer()
-        iterations = len(data_loader) * self.config.epochs
-        scheduler = self.model.get_scheduler(optimizer, iterations)
-
         # PrivacyEngine objects wrap around the original objects
         # N forward passes + N backward passes per batch (where N = batch size)
         # Time is relative to size of dataset to train
-        if self.config.dp_enabled:
-            training_model, optimizer, *_, data_loader = self.dp.make_private(
-                module=self.model,
-                optimizer=optimizer,
-                data_loader=data_loader,
-                noise_multiplier=self.config.noise,
-                max_grad_norm=self.config.clipping, # Clipping
-            )
+        training_model, optimizer, data_loader = self._create_model_packages(
+            data_loader=data_loader
+        )
+        scheduler = self.model.get_scheduler(
+            optimizer=optimizer,
+            cosine_epochs=len(data_loader) * self.config.epochs
+        )
 
         total_loss = 0.0
         total_samples = 0
@@ -303,18 +297,24 @@ class Client:
         """
         self.model.eval()
         test_features, test_labels = test_set
-        data = TensorDataset(test_features, test_labels)
-        data_loader = DataLoader(data, batch_size=self.config.batch_size)
+        data_loader = DataLoader(
+            dataset=TensorDataset(test_features, test_labels),
+            batch_size=self.config.batch_size
+        )
+        evaluation_model, _, data_loader = self._create_model_packages(
+            data_loader=data_loader
+        )
 
-        all_predictions, all_probabilities =  [], []
+        all_predictions, all_probabilities, all_labels =  [], [], []
         n_correct: int = 0
         total_loss: float = 0.0
+        total_samples = 0
 
         with torch.no_grad():
             for batch_features, batch_labels in data_loader:
                 batch_features: Tensor
                 batch_labels: Tensor
-                outputs: Tensor = self.model(batch_features)
+                outputs: Tensor = evaluation_model(batch_features)
                 outputs = outputs.squeeze(1)
                 probabilities = torch.sigmoid(outputs) # auto on self.config.device
                 predictions = (probabilities >= 0.5).float()
@@ -323,14 +323,18 @@ class Client:
                 n_correct += int(n_batch_correct.item())
                 batch_loss: Tensor = self.criterion(outputs, batch_labels)
                 total_loss += batch_loss.item() * len(batch_labels)
+                total_samples += len(batch_labels)
 
                 all_predictions.extend(predictions.cpu().numpy())
                 all_probabilities.extend(probabilities.cpu().numpy())
+                all_labels.extend(batch_labels.cpu().numpy())
+
+        if self.config.dp_enabled:
+            self.model = evaluation_model.to_standard_module()
 
         all_predictions = np.array(all_predictions)
         all_probabilities = np.array(all_probabilities)
-        all_labels = test_labels.cpu().numpy()
-        total_samples = len(test_set[1])
+        all_labels = np.array(all_labels)
         metrics = {
             'accuracy': n_correct / total_samples,
             'loss': total_loss / total_samples,
@@ -343,7 +347,27 @@ class Client:
         self.stored_epsilon = None
         return metrics
 
-def assign_context(function: Callable) -> Callable:
+    def _create_model_packages(
+            self,
+            data_loader: DataLoader
+    ) -> tuple[MLP | GradSampleModule, Adam | DPOptimizer, DataLoader]:
+        if is_evaluating := not self.model.training:
+            self.model.train()
+        model = self.model
+        optimizer = self.model.get_optimizer()
+        if self.config.dp_enabled:
+            model, optimizer, *_, data_loader = self.dp.make_private(
+                module=self.model,
+                optimizer=optimizer,
+                data_loader=data_loader,
+                noise_multiplier=self.config.noise,
+                max_grad_norm=self.config.clipping # Clipping value
+            )
+        if is_evaluating:
+            model.eval()
+        return model, optimizer, data_loader
+
+def _assign_client(function: Callable) -> Callable:
     """
     Initialize and cache client to context to maintain persistence.
     
@@ -360,7 +384,7 @@ def assign_context(function: Callable) -> Callable:
 app = ClientApp()
 
 @app.train()
-@assign_context
+@_assign_client
 def client_train(client: Client, msg: Message) -> Message:
     """
     Initializes dataframe for client, trains, and constructs message to send
@@ -397,7 +421,7 @@ def client_train(client: Client, msg: Message) -> Message:
     return Message(content, reply_to=msg)
 
 @app.evaluate()
-@assign_context
+@_assign_client
 def client_evaluate(client: Client, msg: Message) -> Message:
     """
     Initializes dataframe for client, evaluates, and constructs message to send

@@ -1,5 +1,7 @@
 """Holds multilayer perceptron model."""
 from typing import Iterable
+
+from opacus.optimizers.optimizer import DPOptimizer
 from torch.optim.lr_scheduler import CosineAnnealingLR
 from torch.optim.adam import Adam
 from torch import nn, Tensor
@@ -65,7 +67,7 @@ class MLP(nn.Module):
         )
         return optimizer
 
-    def get_scheduler(self, optimizer: Adam, cosine_epochs: int) -> CosineAnnealingLR:
+    def get_scheduler(self, optimizer: Adam | DPOptimizer, cosine_epochs: int) -> CosineAnnealingLR:
         """
         Create new cosine scheduler.
         
