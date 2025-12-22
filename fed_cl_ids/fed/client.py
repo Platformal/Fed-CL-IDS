@@ -225,11 +225,11 @@ class Client:
         sum_loss: float = 0.0
         n_samples: int = 0
         for batch_features, batch_labels in data_loader:
-            batch_features: Tensor
-            batch_labels: Tensor
             # Poisson sampling could produce empty batch
             if not batch_labels.nelement():
                 continue
+            batch_features: Tensor
+            batch_labels: Tensor
 
             outputs: Tensor = model(batch_features) # Forward pass
             outputs = outputs.squeeze(1)
@@ -279,6 +279,8 @@ class Client:
 
         with torch.no_grad():
             for batch_features, batch_labels in data_loader:
+                if not batch_labels.nelement():
+                    continue
                 batch_features: Tensor
                 batch_labels: Tensor
 

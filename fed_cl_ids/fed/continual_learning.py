@@ -77,13 +77,22 @@ class ExperienceReplay:
             device: torch.device
     ) -> None:
         features, labels = original_dataset
-        rng_values = torch.rand(
-            size=(len(labels),),
-            device=device
-        )
-        bool_mask = rng_values <= sample_rate
-        selected_features = features[bool_mask].cpu().detach()
-        selected_labels = labels[bool_mask].cpu().detach()
+        # Prefer exact n_samples than random per sampling
+        if n_samples := int(len(labels) * sample_rate):
+            selected = torch.randint(
+                low=0,
+                high=len(labels),
+                size=(n_samples,),
+                device=device
+            )
+        else:
+            uniform_values = torch.rand(
+                size=(len(labels),),
+                device=device
+            )
+            selected = uniform_values <= sample_rate
+        selected_features = features[selected].cpu().detach()
+        selected_labels = labels[selected].cpu().detach()
         self._buffer.append(selected_features, selected_labels)
 
 class ReplayBuffer:
