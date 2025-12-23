@@ -1,5 +1,5 @@
-"""Module for continual learning using experience replay and
-elastic weight consolidation."""
+"""Module for continual learning using experience replay
+and elastic weight consolidation."""
 from typing import Literal, Optional
 from pathlib import Path
 
@@ -19,11 +19,11 @@ class ContinualLearning:
             er_filepath_identifier: int | str,
             er_runtime_directory: Path
     ) -> None:
-        self.ewc = ElasticWeightConsolidation()
         self.er = ExperienceReplay(
             filepath_identifier=er_filepath_identifier,
             runtime_directory=er_runtime_directory
         )
+        self.ewc = ElasticWeightConsolidation()
 
 class ExperienceReplay:
     def __init__(
@@ -53,22 +53,21 @@ class ExperienceReplay:
         if not (actual_size := min(len(self._buffer), ideal_size)):
             return original_dataset
         # Ratio will be off until replay buffer size >= replay sample size
-        np_dataset = self._buffer.sample(actual_size)
-        return self._concat_samples(original_dataset, np_dataset, device)
+        new_dataset = self._buffer.sample(actual_size)
+        return self._concat_datasets(original_dataset, new_dataset, device)
 
-    def _concat_samples(
+    def _concat_datasets(
             self,
-            original_dataset: tuple[Tensor, Tensor],
-            np_dataset: tuple[np.ndarray, np.ndarray],
+            tensor_data: tuple[Tensor, Tensor],
+            numpy_data: tuple[np.ndarray, np.ndarray],
             device: torch.device
     ) -> tuple[Tensor, Tensor]:
-        np_features, np_labels = np_dataset
-        new_features = torch.from_numpy(np_features).to(device)
-        new_labels = torch.from_numpy(np_labels).to(device)
-        original_features, original_labels = original_dataset
-        concat_features = torch.cat((original_features, new_features))
-        concat_labels = torch.cat((original_labels, new_labels))
-        return concat_features, concat_labels
+        new_tensor_data = tuple(map(
+            lambda np_array: torch.from_numpy(np_array).to(device),
+            numpy_data
+        ))
+        features, labels = map(torch.cat, zip(tensor_data, new_tensor_data))
+        return features, labels
 
     def add_data(
             self,
@@ -134,8 +133,8 @@ class ReplayBuffer:
     def append(self, features: Tensor, labels: Tensor) -> None:
         """
         Add features and labels into memory mapped files. Will early return if
-        size of rows is 0.
-        
+        size of rows is 0. Assumes features are 2D and labels are 1D
+
         :param features: Make sure columns of features is consistent.
         :type features: Tensor
         :param labels: Make sure number of labels matches rows of features.
@@ -203,7 +202,7 @@ class ElasticWeightConsolidation:
         sum_loss = torch.tensor(0.0, device=device)
         for name, parameter in model.named_parameters():
             # Private model prepends _module. to each param name
-            name = name.removeprefix("_module.")
+            name = name.removeprefix('_module.')
             if name not in self._prev_parameters:
                 print("Parameter not in prev_parameters")
                 continue # Never triggered

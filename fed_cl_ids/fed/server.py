@@ -38,7 +38,6 @@ class ServerConfiguration:
 
         self.n_days = int(context.run_config['max-days'])
         self.n_rounds = int(context.run_config['n-rounds'])
-
         self.dp_enabled = bool(context.run_config['dp-enabled'])
 
 class Server:
@@ -108,7 +107,7 @@ class Server:
         return splits
 
     @staticmethod
-    def distribute_flows(flows: Iterable[int], n_clients: int) -> list[list[int], ...]:
+    def distribute_flows(flows: Iterable[int], n_clients: int) -> list[list[int]]:
         """
         Hash each flow by ID and assign to a bucket for each client.
         
