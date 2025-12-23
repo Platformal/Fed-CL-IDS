@@ -25,7 +25,7 @@ import torch
 from fed_cl_ids.fed.continual_learning import ContinualLearning
 from fed_cl_ids.fed.differential_privacy import DifferentialPrivacy
 from fed_cl_ids.models.mlp import MLP, Adam, CosineAnnealingLR
-from fed_cl_ids.models.losses import Losses
+from fed_cl_ids.models.fed_metrics import FedMetrics
 
 MAIN_PATH = Path().cwd() / 'fed_cl_ids'
 
@@ -305,16 +305,19 @@ class Client:
         all_predictions = np.array(all_predictions)
         all_probabilities = np.array(all_probabilities)
         all_labels = np.array(all_labels)
+        training_epsilon = -1 # Default sentinel value
+        if self.stored_epsilon is not None:
+            training_epsilon = self.stored_epsilon
+            self.stored_epsilon = None
         metrics = {
             'accuracy': n_correct / total_samples,
             'loss': total_loss / total_samples,
-            'roc-auc': Losses.roc_auc(all_labels, all_probabilities),
-            'pr-auc': Losses.pr_auc(all_labels, all_probabilities),
-            'macro-f1': Losses.macro_f1(all_labels, all_predictions),
-            'recall@fpr=1%': Losses.recall_at_fpr(all_labels, all_probabilities, 0.01),
-            'epsilon': -1 if self.stored_epsilon is None else self.stored_epsilon
+            'roc-auc': FedMetrics.roc_auc(all_labels, all_probabilities),
+            'pr-auc': FedMetrics.pr_auc(all_labels, all_probabilities),
+            'macro-f1': FedMetrics.macro_f1(all_labels, all_predictions),
+            'recall@fpr=1%': FedMetrics.recall_at_fpr(all_labels, all_probabilities, 0.01),
+            'epsilon': training_epsilon
         }
-        self.stored_epsilon = None
         return metrics
 
     def _create_model_packages(

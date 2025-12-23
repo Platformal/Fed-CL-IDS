@@ -12,12 +12,13 @@ from torch import Tensor
 import torch
 import yaml
 
-from flwr.app import ArrayRecord, ConfigRecord, Context
+from flwr.app import ArrayRecord, ConfigRecord, Context, MetricRecord
 from flwr.serverapp.strategy import Result
 from flwr.serverapp import Grid, ServerApp
 
 from sklearn.model_selection import train_test_split
 from fed_cl_ids.fed.custom_strategies import UAVIDSFedAvg
+from fed_cl_ids.models.fed_metrics import FedMetrics
 from fed_cl_ids.models.mlp import MLP
 
 MAIN_PATH = Path().cwd() / 'fed_cl_ids'
@@ -109,7 +110,7 @@ class Server:
         return splits
 
     @staticmethod
-    def distribute_flows(flows: Iterable[int], n_clients: int) -> list[list[int], ...]:
+    def distribute_flows(flows: Iterable[int], n_clients: int) -> list[list[int]]:
         """
         Hash each flow by ID and assign to a bucket for each client.
         
@@ -120,7 +121,7 @@ class Server:
         :return: List of integers for each client to process.
         :rtype: list[list[int], ...]
         """
-        clients = list([] for _ in range(n_clients))
+        clients = [[] for _ in range(n_clients)]
         for flow_id in flows:
             id_bytes = str(flow_id).encode()
             id_hex = hashlib.sha256(id_bytes).hexdigest()
@@ -132,15 +133,7 @@ app = ServerApp()
 
 @app.main()
 def main(grid: Grid, context: Context) -> None:
-    """
-    Triggered when flwr run is called.
-    
-    :param grid: Description
-    :type grid: Grid
-    :param context: Description
-    :type context: Context
-    """
-
+    """Triggered when flwr run is called."""
     if RUNTIME_PATH.exists():
         clear_directory(RUNTIME_PATH)
     else:
@@ -148,7 +141,7 @@ def main(grid: Grid, context: Context) -> None:
 
     server = Server(grid, context)
     uavids_days = get_uavids(server, UAVIDS_DAYS_PATH)
-    daily_metric_logs = []
+    daily_metric_logs: list[list[MetricRecord]] = []
 
     start = time.time()
     for day, raw_flows in enumerate(uavids_days.values(), 1):
@@ -171,10 +164,10 @@ def main(grid: Grid, context: Context) -> None:
             train_config=ConfigRecord({'flows': json.dumps(train_flows)}),
             evaluate_config=ConfigRecord({'flows': json.dumps(evaluate_flows)}),
         )
-        rounds_eval_metrics = list(result.evaluate_metrics_clientapp.values())
-        daily_metric_logs.append(rounds_eval_metrics)
-        log_results(server, result, day)
-    print(time.time() - start)
+        log_results(server, result, day, daily_metric_logs)
+    print(f"Final Time: {time.time() - start}")
+
+    FedMetrics.create_metric_plots(daily_metric_logs, OUTPUT_PATH)
     with (OUTPUT_PATH / 'metrics.txt').open('a', encoding='utf-8') as file:
         file.write('\n')
     clear_directory(RUNTIME_PATH)
@@ -186,7 +179,7 @@ def clear_directory(filepath: Path) -> None:
     :param path: Path to the folder
     :type path: Path
     """
-    for file in [path for path in filepath.iterdir() if path.is_file()]:
+    for file in filter(lambda x: x.is_file(), filepath.iterdir()):
         file.unlink()
 
 def get_uavids(server: Server, filepath: Path) -> dict[str, list[int]]:
@@ -206,15 +199,23 @@ def get_uavids(server: Server, filepath: Path) -> dict[str, list[int]]:
     filtered_days = tuple(raw_days.items())[:server.config.n_days]
     return dict(filtered_days)
 
-def log_results(server: Server, result: Result, day: int) -> None:
+def log_results(
+        server: Server,
+        result: Result,
+        day: int,
+        daily_metrics: list[list[MetricRecord]]
+) -> None:
     """Saves aggregated model as pt file and logs aggregated metrics"""
     server.current_parameters = result.arrays.to_torch_state_dict()
     torch.save(server.current_parameters, OUTPUT_PATH / f'Day{day}.pt')
 
+    rounds_eval_metrics = list(result.evaluate_metrics_clientapp.values())
+    daily_metrics.append(rounds_eval_metrics)
+
     sum_epsilon_day: Optional[float] = None
     if server.config.dp_enabled:
         sum_epsilon_day = sum(
-            round_metric['epsilon']
+            float(round_metric['epsilon'])
             for round_metric in result.evaluate_metrics_clientapp.values()
         )
         server.total_epsilon += sum_epsilon_day

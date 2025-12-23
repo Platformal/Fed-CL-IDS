@@ -319,7 +319,7 @@ class UAVIDSFedAvg(FedAvg):
             self.weighted_by_key,
         )
         return array_record, metrics
-    
+
 def str_config(config: ConfigRecord) -> str:
     """Ensures start log does not print all elements in flows"""
     all_config_str: list[str] = []
