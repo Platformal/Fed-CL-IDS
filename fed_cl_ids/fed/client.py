@@ -286,7 +286,7 @@ class Client:
 
                 outputs: Tensor = evaluation_model(batch_features)
                 outputs = outputs.squeeze(1)
-                probabilities = torch.sigmoid(outputs) # auto on self.config.device
+                probabilities = torch.sigmoid(outputs)
                 predictions = (probabilities >= 0.5).float()
 
                 n_batch_correct: Tensor = (predictions == batch_labels).sum()

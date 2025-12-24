@@ -39,7 +39,6 @@ class ServerConfiguration:
 
         self.n_days = int(context.run_config['max-days'])
         self.n_rounds = int(context.run_config['n-rounds'])
-
         self.dp_enabled = bool(context.run_config['dp-enabled'])
 
 class Server:
