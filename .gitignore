@@ -1,5 +1,23 @@
+# Other
 *
+.vscode
+__pycache__
+!__init__.py
 
-!fed_cl_ids/fed
-!fed_cl_ids/models
-!fed_cl_ids/outputs/metrics.txt
+# Fed-Cl-IDS
+!data_pipeline
+!data_pipeline/**
+
+!fed
+!fed/*.py
+
+!models
+!models/*.py
+
+!outputs
+!outputs/metrics.txt
+
+!pyproject.toml
+
+# User
+!README.md

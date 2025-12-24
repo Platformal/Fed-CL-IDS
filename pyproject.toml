@@ -28,8 +28,9 @@ publisher = "Frank"
 
 # Point to ServerApp and ClientApp objects
 [tool.flwr.app.components]
-serverapp = "fed_cl_ids.fed.server:app"
-clientapp = "fed_cl_ids.fed.client:app"
+# serverapp = "fed_cl_ids.fed.server:app"
+serverapp = "fed.server:app"
+clientapp = "fed.client:app"
 
 # Custom config values accessible via `context.run_config`
 # Example: flwr run -c 'max-days=2 n-rounds=3'
