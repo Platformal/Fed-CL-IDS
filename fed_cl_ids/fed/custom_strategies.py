@@ -1,5 +1,5 @@
-from collections.abc import Iterable
-from typing import Callable, Optional
+from typing import Callable, Optional, Iterable
+from collections import OrderedDict
 from logging import INFO
 import json
 import time
@@ -33,17 +33,23 @@ class UAVIDSFedAvg(FedAvg):
 
     # Changed sample_nodes function only to initialize
     def configure_train(
-        self, server_round: int, arrays: ArrayRecord, 
-        config: ConfigRecord, grid: Grid) -> Iterable[Message]:
+            self,
+            server_round: int,
+            arrays: ArrayRecord,
+            config: ConfigRecord,
+            grid: Grid
+    ) -> Iterable[Message]:
         """Configure the next round of federated training"""
         if self.fraction_train == 0.0:
             return []
         if not self.train_node_ids:
             num_nodes = int(len(list(grid.get_node_ids())) * self.fraction_train)
             sample_size = max(num_nodes, self.min_train_nodes)
-            node_ids, num_total = sample_nodes(grid, self.min_available_nodes, sample_size)
-            self.all_node_ids = num_total
-            self.train_node_ids = node_ids
+            self.train_node_ids, self.all_node_ids = sample_nodes(
+                grid=grid,
+                min_available_nodes=self.min_available_nodes,
+                sample_size=sample_size
+            )
         log(
             INFO,
             "configure_train: Sampled %s nodes (out of %s)",
@@ -115,12 +121,12 @@ class UAVIDSFedAvg(FedAvg):
             self.evaluate_node_ids = node_ids
         log(
             INFO,
-            f"configure_evaluate: Sampled {len(self.evaluate_node_ids)} nodes "
-            f"(out of {len(self.all_node_ids)})",
+            "configure_evaluate: Sampled %s nodes (out of %s)",
+            len(self.evaluate_node_ids), len(self.all_node_ids)
         )
 
         # Always inject current server round
-        config["server-round"] = server_round
+        config['server-round'] = server_round
 
         # Construct messages
         record = RecordDict({
@@ -297,20 +303,20 @@ class UAVIDSFedAvg(FedAvg):
 
         reply_contents = [msg.content for msg in valid_replies]
         arrays: list[dict[str, Tensor]] = [
-            content[self.arrayrecord_key].to_torch_state_dict() 
+            content[self.arrayrecord_key].to_torch_state_dict()
             for content in reply_contents
         ]
 
-        aggregated_model: dict[str, Tensor] = {}
+        aggregated_model: OrderedDict[str, Tensor] = OrderedDict()
+        # This iterates over all keys, averaging them,
+        # and appending to the aggregated model
         with torch.no_grad():
-            # Parameter key example: 'network.9.weight', 'network.9.bias', ...
-            for parameter_key in arrays[0].keys():
-                tensors_of_key: Tensor = torch.stack([
-                    torch.as_tensor(array[parameter_key]).to(self.device)
-                    for array in arrays
-                ], dim=0)
-                averaged_tensor = torch.mean(tensors_of_key, dim=0)
-                aggregated_model[parameter_key] = averaged_tensor.cpu()
+            # Parameter key examples: 'network.9.weight', 'network.9.bias', ...
+            # Tensors already on cpu #sus 🤨
+            for key in arrays[0].keys():
+                tensors_of_key = torch.stack([array[key] for array in arrays])
+                averaged_tensor = torch.mean(tensors_of_key, dim=0).cpu()
+                aggregated_model[key] = averaged_tensor
         array_record = ArrayRecord(aggregated_model)
 
         # Aggregate MetricRecords
@@ -336,7 +342,7 @@ def str_config(config: ConfigRecord) -> str:
         else:
             string = f"'{key}': '{value}'"
         all_config_str.append(string)
-    content = ", ".join(all_config_str)
+    content = ', '.join(all_config_str)
     return f"{{{content}}}"
 
 def log_strategy_start_info(

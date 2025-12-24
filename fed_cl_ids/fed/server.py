@@ -144,17 +144,17 @@ def main(grid: Grid, context: Context) -> None:
 
     start = time.time()
     for day, raw_flows in enumerate(uavids_days.values(), 1):
-        train_flows, evaluate_flows = server.split_data(
+        # 80/20 split
+        train_flows, evaluation_flows = server.split_data(
             raw_flows=raw_flows,
             csv_path=UAVIDS_DATA_PATH
         )
-        train_flows = Server.distribute_flows(
-            flows=train_flows,
-            n_clients=server.config.n_train_clients
-        )
-        evaluate_flows = Server.distribute_flows(
-            flows=evaluate_flows,
-            n_clients=server.config.n_evaluate_clients
+        # Train flows (80%) gets hashed into 5 clients (fraction train = 0.5)
+        # Evaluate flows (20%) gets hashed into 10 clients (evaluate = 1.0)
+        train_flows, evaluate_flows = map(
+            Server.distribute_flows,
+            (train_flows, evaluation_flows),
+            (server.config.n_train_clients, server.config.n_evaluate_clients)
         )
         result = server.federated_model.start(
             grid=grid,
@@ -195,7 +195,7 @@ def get_uavids(server: Server, filepath: Path) -> dict[str, list[int]]:
     with filepath.open(encoding='utf-8') as file:
         raw_days: dict[str, list[int]] = yaml.safe_load(file)
     # Assuming dict is sorted/ordered by days
-    filtered_days = tuple(raw_days.items())[:server.config.n_days]
+    filtered_days = list(raw_days.items())[:server.config.n_days]
     return dict(filtered_days)
 
 def log_results(
@@ -205,9 +205,11 @@ def log_results(
         daily_metrics: list[list[MetricRecord]]
 ) -> None:
     """Saves aggregated model as pt file and logs aggregated metrics"""
+    # Saves most recent aggregated data from the rounds not average per day
     server.current_parameters = result.arrays.to_torch_state_dict()
     torch.save(server.current_parameters, OUTPUT_PATH / f'Day{day}.pt')
 
+    # Saves dict pairs for each round
     rounds_eval_metrics = list(result.evaluate_metrics_clientapp.values())
     daily_metrics.append(rounds_eval_metrics)
 
@@ -219,7 +221,7 @@ def log_results(
         )
         server.total_epsilon += sum_epsilon_day
 
-    n_rounds, metrics = result.evaluate_metrics_clientapp.popitem()
+    n_rounds, eval_metrics = result.evaluate_metrics_clientapp.popitem()
     with (OUTPUT_PATH / 'metrics.txt').open('a', encoding='utf-8') as file:
         file.write(
             f"Day {day}"
@@ -227,5 +229,5 @@ def log_results(
             f" | Rounds: {n_rounds}"
             f" | Day Epsilon: {sum_epsilon_day}"
             f" | Total Epsilon: {server.total_epsilon}"
-            f" | {str(metrics)}\n"
+            f" | {str(eval_metrics)}\n"
         )

@@ -41,10 +41,10 @@ class FedMetrics:
             roc_auc = [metrics['roc-auc'] for metrics in rounds]
             plt.plot(x, roc_auc, label=f'Day {day}')
         plt.title(
-            "Area Under Receiver Operating Characteristic Curve\n" \
-            "of Days per Round"
+            "Area Under Receiver Operating Characteristic Curve\n"
+            "by Days per Round"
         )
         plt.xlabel('Rounds')
         plt.ylabel('AUROC Curve')
         plt.legend(loc='lower right')
-        plt.savefig(save_directory / 'daily_roc_auc.png')
+        plt.savefig(save_directory / 'daily_roc_auc.png', dpi=200)

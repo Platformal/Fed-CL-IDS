@@ -62,11 +62,9 @@ class ExperienceReplay:
             numpy_data: tuple[np.ndarray, np.ndarray],
             device: torch.device
     ) -> tuple[Tensor, Tensor]:
-        new_tensor_data = tuple(map(
-            lambda np_array: torch.from_numpy(np_array).to(device),
-            numpy_data
-        ))
-        features, labels = map(torch.cat, zip(tensor_data, new_tensor_data))
+        new_tensors = tuple(map(torch.from_numpy, numpy_data))
+        new_tensors = tuple(map(lambda x: x.to(device), new_tensors))
+        features, labels = map(torch.cat, zip(tensor_data, new_tensors))
         return features, labels
 
     def add_data(
