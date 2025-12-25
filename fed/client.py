@@ -149,20 +149,19 @@ class Client:
         :rtype: float
         """
         self.model.train()
-        train_features, train_labels = train_set
 
         if self.config.cl_enabled:
-            train_features, train_labels = self.cl.er.sample_replay_buffer(
+            train_set = self.cl.er.sample_replay_buffer(
                 original_dataset=train_set,
-                n_new_samples=len(train_labels),
+                n_new_samples=len(train_set[1]),
                 ratio_old_samples=self.config.er_mix_ratio,
                 device=self.config.device
             )
 
         data_loader = DataLoader(
-            dataset=TensorDataset(train_features, train_labels),
+            dataset=TensorDataset(*train_set),
             batch_size=self.config.batch_size,
-            shuffle=True,
+            shuffle=True
         )
         # PrivacyEngine objects wrap around the original objects
         # N forward passes + N backward passes per batch (where N = batch size)
@@ -236,7 +235,7 @@ class Client:
             if self.config.cl_enabled and not self.cl.ewc.is_empty():
                 batch_fisher_penalty = self.cl.ewc.calculate_penalty(
                     model=model,
-                    lambda_penalty=self.config.ewc_lambda,
+                    ewc_lambda=self.config.ewc_lambda,
                     device=self.config.device
                 )
                 loss += batch_fisher_penalty
@@ -312,7 +311,9 @@ class Client:
             'roc-auc': FedMetrics.roc_auc(all_labels, all_probabilities),
             'pr-auc': FedMetrics.pr_auc(all_labels, all_probabilities),
             'macro-f1': FedMetrics.macro_f1(all_labels, all_predictions),
-            'recall@fpr=1%': FedMetrics.recall_at_fpr(all_labels, all_probabilities, 0.01),
+            'recall@fpr=1%': FedMetrics.recall_at_fpr(
+                all_labels, all_probabilities, 0.01
+            ),
             'epsilon': training_epsilon
         }
         return metrics

@@ -18,6 +18,3 @@ __pycache__
 !outputs/metrics.txt
 
 !pyproject.toml
-
-# User
-!README.md

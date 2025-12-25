@@ -5,11 +5,12 @@ import yaml
 
 # Map UAVIDS-2025.csv flows to clients.yaml
 # Via deterministic hashing (src, dst, protocol)
-def deterministic_hash(row: pd.Series, n_clients: int) -> int:
-    key = f"{row['SrcAddr']}{row['DstAddr']}{row['Protocol']}"
-    hash_str = hashlib.sha256(key.encode()).hexdigest()
-    client_id = int(hash_str, 16) % n_clients
-    return client_id
+# Unused since FlowIDs are hashed in server.py
+# def deterministic_hash(row: pd.Series, n_clients: int) -> int:
+#     key = f"{row['SrcAddr']}{row['DstAddr']}{row['Protocol']}"
+#     hash_str = hashlib.sha256(key.encode()).hexdigest()
+#     client_id = int(hash_str, 16) % n_clients
+#     return client_id
 
 def generate_clients(n_clients: int) -> None:
     df = pd.read_csv("fed_cl_ids/datasets/UAVIDS-2025.csv")

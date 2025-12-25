@@ -73,23 +73,25 @@ class ExperienceReplay:
             sample_rate: float,
             device: torch.device
     ) -> None:
-        features, labels = original_dataset
+        n_dataset_samples = len(original_dataset[1])
         # Prefer exact n_samples than random per sampling
-        if n_samples := int(len(labels) * sample_rate):
+        if n_samples := int(n_dataset_samples * sample_rate):
             selected = torch.randint(
                 low=0,
-                high=len(labels),
+                high=n_dataset_samples,
                 size=(n_samples,),
                 device=device
             )
         else:
             uniform_values = torch.rand(
-                size=(len(labels),),
+                size=(n_dataset_samples,),
                 device=device
             )
             selected = uniform_values <= sample_rate
-        selected_features = features[selected].cpu().detach()
-        selected_labels = labels[selected].cpu().detach()
+        selected_features, selected_labels = map(
+            lambda tensor_data: tensor_data[selected].cpu().detach(),
+            original_dataset
+        )
         self._buffer.append(selected_features, selected_labels)
 
 class ReplayBuffer:
@@ -202,7 +204,7 @@ class ElasticWeightConsolidation:
     def calculate_penalty(
             self,
             model: MLP | GradSampleModule,
-            lambda_penalty: int | float,
+            ewc_lambda: int | float,
             device: torch.device
     ) -> Tensor:
         # Penalty = (λ/2) * Σ F_i(θ_i - θ*_i)²
@@ -212,12 +214,12 @@ class ElasticWeightConsolidation:
             name = name.removeprefix('_module.')
             if name not in self._prev_parameters:
                 print("Parameter not in prev_parameters")
-                continue # Never triggered
+                continue # Never triggered (since ewc.is_empty())
             f_i = self._fisher_diagonal[name]
             theta_star = self._prev_parameters[name]
             penalty_i = f_i * (parameter - theta_star).pow(2)
             sum_loss += penalty_i.sum()
-        return lambda_penalty * 0.5 * sum_loss
+        return ewc_lambda * 0.5 * sum_loss
 
     def update_fisher_information(
             self,

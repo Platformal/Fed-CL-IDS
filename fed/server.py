@@ -145,7 +145,7 @@ def main(grid: Grid, context: Context) -> None:
     start = time.time()
     for day, raw_flows in enumerate(uavids_days.values(), 1):
         # 80/20 split
-        train_flows, evaluation_flows = server.split_data(
+        train_split, evaluation_split = server.split_data(
             raw_flows=raw_flows,
             csv_path=UAVIDS_DATA_PATH
         )
@@ -153,7 +153,7 @@ def main(grid: Grid, context: Context) -> None:
         # Evaluate flows (20%) gets hashed into 10 clients (evaluate = 1.0)
         train_flows, evaluate_flows = map(
             Server.distribute_flows,
-            (train_flows, evaluation_flows),
+            (train_split, evaluation_split),
             (server.config.n_train_clients, server.config.n_evaluate_clients)
         )
         result = server.federated_model.start(
