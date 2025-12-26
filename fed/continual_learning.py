@@ -1,14 +1,14 @@
 """Module for continual learning using experience replay
 and elastic weight consolidation."""
-from typing import Literal, Optional
+from dataclasses import dataclass
 from pathlib import Path
+import math
 
 from opacus.grad_sample.grad_sample_module import GradSampleModule
 from torch.utils.data import DataLoader, TensorDataset
 from torch.nn import BCEWithLogitsLoss
 from torch import Tensor
 import torch
-import numpy as np
 
 from models.mlp import MLP
 
@@ -17,198 +17,30 @@ class ContinualLearning:
     def __init__(
             self,
             er_filepath_identifier: int | str,
-            er_runtime_directory: Path
+            er_runtime_directory: Path,
+            device: torch.device
     ) -> None:
+        self.ewc = ElasticWeightConsolidation(device)
         self.er = ExperienceReplay(
             filepath_identifier=er_filepath_identifier,
-            runtime_directory=er_runtime_directory
+            runtime_directory=er_runtime_directory,
+            device=device
         )
-        self.ewc = ElasticWeightConsolidation()
-
-class ExperienceReplay:
-    def __init__(
-            self,
-            filepath_identifier: int | str,
-            runtime_directory: Path
-    ) -> None:
-        self._buffer = ReplayBuffer(
-            identifier=filepath_identifier,
-            path=runtime_directory
-        )
-
-    def sample_replay_buffer(
-            self,
-            original_dataset: tuple[Tensor, Tensor],
-            n_new_samples: int,
-            ratio_old_samples: float,
-            device: torch.device
-    ) -> tuple[Tensor, Tensor]:
-        if not ratio_old_samples or not n_new_samples:
-            return original_dataset
-        if ratio_old_samples >= 1.00:
-            raise ValueError("Experience replay cannot be >= 100%")
-        # Could also do: (new_samples * 0.2) / 0.8 = 20% of total (mix = 0.2)
-        true_ratio = (1 - ratio_old_samples) / ratio_old_samples
-        ideal_size = int(n_new_samples / true_ratio)
-        if not (actual_size := min(len(self._buffer), ideal_size)):
-            return original_dataset
-        # Ratio will be off until replay buffer size >= replay sample size
-        new_dataset = self._buffer.sample(actual_size)
-        return self._concat_datasets(original_dataset, new_dataset, device)
-
-    def _concat_datasets(
-            self,
-            tensor_data: tuple[Tensor, Tensor],
-            numpy_data: tuple[np.ndarray, np.ndarray],
-            device: torch.device
-    ) -> tuple[Tensor, Tensor]:
-        new_tensors = tuple(map(torch.from_numpy, numpy_data))
-        new_tensors = tuple(map(lambda x: x.to(device), new_tensors))
-        features, labels = map(torch.cat, zip(tensor_data, new_tensors))
-        return features, labels
-
-    def add_data(
-            self,
-            original_dataset: tuple[Tensor, Tensor],
-            sample_rate: float,
-            device: torch.device
-    ) -> None:
-        n_dataset_samples = len(original_dataset[1])
-        # Prefer exact n_samples than random per sampling
-        if n_samples := int(n_dataset_samples * sample_rate):
-            selected = torch.randint(
-                low=0,
-                high=n_dataset_samples,
-                size=(n_samples,),
-                device=device
-            )
-        else:
-            uniform_values = torch.rand(
-                size=(n_dataset_samples,),
-                device=device
-            )
-            selected = uniform_values <= sample_rate
-        selected_features, selected_labels = map(
-            lambda tensor_data: tensor_data[selected].cpu().detach(),
-            original_dataset
-        )
-        self._buffer.append(selected_features, selected_labels)
-
-class ReplayBuffer:
-    """Maps the replay buffer to disk as a numpy memory-mapped array 
-    (essentially a ndarray). All operations using replay buffer is respective
-    to numpy and its arrays.
-    
-    The runtime folder should be cleared every run to prevent file name 
-    conflicts."""
-    def __init__(
-            self,
-            identifier: int | str,
-            path: Path,
-            np_dtype: str = 'float32'
-    ) -> None:
-        self.dtype = np_dtype
-        self._length: int = 0
-
-        # Two separate files since you don't have to
-        # convert labels to 2D -> 1D and vice versa when sampling
-        self.features_path = path / f'{identifier}_features.dat'
-        self.labels_path = path / f'{identifier}_labels.dat'
-
-        # Memory mapped, works as any ndarray
-        self._features: np.memmap
-        self._labels: np.memmap
-
-    def sample(self, n_samples: int) -> tuple[np.ndarray, np.ndarray]:
-        """
-        Randomly samples from buffer for tensors.
-        
-        :param n_samples: How many samples to retrieve. Will raise an error if
-        the replay buffer is empty or n_samples is bigger than buffer.
-        :type n_samples: int
-        :return: Tensor of features and labels.
-        :rtype: tuple[Tensor, Tensor]
-        """
-        if not self._length:
-            raise ValueError("Empty replay buffer.")
-        if n_samples > self._length:
-            raise ValueError("Sample size larger than replay buffer size.")
-
-        indices = np.random.choice(self._length, n_samples, replace=False)
-        np_features = self._features[indices].copy()
-        np_labels = self._labels[indices].copy()
-        return np_features, np_labels
-
-    def append(self, features: Tensor, labels: Tensor) -> None:
-        """
-        Add features and labels into memory mapped files. Will early return if
-        size of rows is 0. Assumes features are 2D and labels are 1D
-
-        :param features: Make sure columns of features is consistent.
-        :type features: Tensor
-        :param labels: Make sure number of labels matches rows of features.
-        :type labels: Tensor
-        """
-        if not labels.nelement():
-            return
-        new_length = self._length + len(labels)
-        writing_mode = 'r+' if self._length else 'w+'
-        self._features = self._copy_to_new_memmap(
-            path=self.features_path,
-            writing_mode=writing_mode,
-            new_shape=(new_length, features.shape[1]),
-            old_data=getattr(self, '_features', None),
-            new_data=features
-        )
-        self._labels = self._copy_to_new_memmap(
-            path=self.labels_path,
-            writing_mode=writing_mode,
-            new_shape=(new_length,),
-            old_data=getattr(self, '_labels', None),
-            new_data=labels
-        )
-        self._length = new_length
-
-    def _copy_to_new_memmap(
-            self,
-            path: Path,
-            writing_mode: Literal['r+', 'w+'],
-            new_shape: tuple,
-            old_data: Optional[np.memmap],
-            new_data: np.ndarray | Tensor
-    ) -> np.memmap:
-        new_memmap = np.memmap(
-            filename=path,
-            dtype=self.dtype,
-            mode=writing_mode,
-            shape=new_shape
-        )
-        if old_data is not None:
-            new_memmap[:self._length] = old_data
-        new_memmap[self._length:] = new_data
-        new_memmap.flush() # Updates .dat file with new memmap
-        return new_memmap
-
-    def __len__(self) -> int:
-        return self._length
-
-    def __bool__(self) -> bool:
-        return bool(self._length)
 
 
 class ElasticWeightConsolidation:
-    def __init__(self) -> None:
+    def __init__(self, device: torch.device) -> None:
+        self.device = device
         self._prev_parameters: dict[str, Tensor] = {}
         self._fisher_diagonal: dict[str, Tensor] = {}
 
     def calculate_penalty(
             self,
             model: MLP | GradSampleModule,
-            ewc_lambda: int | float,
-            device: torch.device
+            ewc_lambda: int | float
     ) -> Tensor:
         # Penalty = (λ/2) * Σ F_i(θ_i - θ*_i)²
-        sum_loss = torch.tensor(0.0, device=device)
+        sum_loss = torch.tensor(0.0, device=self.device)
         for name, parameter in model.named_parameters():
             # Private model prepends _module. to each param name
             name = name.removeprefix('_module.')
@@ -226,8 +58,8 @@ class ElasticWeightConsolidation:
             model: MLP,
             train_set: tuple[Tensor, Tensor],
             criterion: BCEWithLogitsLoss,
-            batch_size: int,
-            device: torch.device) -> None:
+            batch_size: int
+    ) -> None:
         """
         Calculates the fisher diagonal from the current model
         and training data.
@@ -242,7 +74,7 @@ class ElasticWeightConsolidation:
             raise TypeError("MLP model should be passed")
 
         new_fisher: dict[str, Tensor] = {
-            name: torch.zeros_like(parameter, device=device)
+            name: torch.zeros_like(parameter, device=self.device)
             for name, parameter in model.named_parameters()
             if parameter.requires_grad
         }
@@ -262,7 +94,6 @@ class ElasticWeightConsolidation:
             loss: Tensor = criterion(outputs, batch_labels)
             loss.backward()
 
-            # Sum of square gradients
             with torch.no_grad():
                 for name, parameter in model.named_parameters():
                     if parameter.grad is None:
@@ -270,7 +101,7 @@ class ElasticWeightConsolidation:
                     square_gradients = parameter.grad.detach().pow(2)
                     new_fisher[name] += square_gradients * len(batch_labels)
 
-        total_samples = len(train_set[1]) # Should equal samples in dataloader
+        total_samples = len(train_set[1])
         for name in new_fisher:
             new_fisher[name] /= total_samples
 
@@ -291,3 +122,149 @@ class ElasticWeightConsolidation:
 
     def is_empty(self) -> bool:
         return not bool(self._prev_parameters)
+
+
+class ExperienceReplay:
+    def __init__(
+            self,
+            filepath_identifier: int | str,
+            runtime_directory: Path,
+            device: torch.device
+    ) -> None:
+        self.device = device
+        self._buffer = ReplayBuffer(
+            identifier=filepath_identifier,
+            path=runtime_directory
+        )
+
+    def sample_replay_buffer(
+            self,
+            original_dataset: tuple[Tensor, Tensor],
+            n_new_samples: int,
+            ratio_old_samples: float,
+    ) -> tuple[Tensor, Tensor]:
+        if not ratio_old_samples or not n_new_samples:
+            return original_dataset
+        if ratio_old_samples >= 1.00:
+            raise ValueError("Experience replay cannot be >= 100%")
+        # Could also do: (new_samples * 0.2) / 0.8 = 20% of total (mix = 0.2)
+        true_ratio = (1 - ratio_old_samples) / ratio_old_samples
+        ideal_size = int(n_new_samples / true_ratio)
+        if not (actual_size := min(len(self._buffer), ideal_size)):
+            return original_dataset
+        # Ratio will be off until replay buffer size >= replay sample size
+        new_dataset = self._buffer.sample(actual_size)
+        return self._concat_datasets(original_dataset, new_dataset)
+
+    def _concat_datasets(
+            self,
+            tensor_data: tuple[Tensor, Tensor],
+            sampled_tensors: tuple[Tensor, Tensor],
+    ) -> tuple[Tensor, Tensor]:
+        new_tensors = tuple(map(lambda x: x.to(self.device), sampled_tensors))
+        features, labels = map(torch.cat, zip(tensor_data, new_tensors))
+        return features, labels
+
+    def add_data(
+            self,
+            original_dataset: tuple[Tensor, Tensor],
+            sample_rate: float,
+    ) -> None:
+        # Prefer exact n_samples than random per sampling
+        features, labels = original_dataset
+        n_dataset_samples = len(labels)
+        if n_samples := int(n_dataset_samples * sample_rate):
+            selected = torch.randint(
+                0, n_dataset_samples,
+                size=(n_samples,),
+                device=self.device
+            )
+        else:
+            uniform_values = torch.rand((n_dataset_samples,), device=self.device)
+            selected = uniform_values <= sample_rate
+        selected_features = features[selected].cpu().detach()
+        selected_labels = labels[selected].cpu().detach()
+        self._buffer.append(selected_features, selected_labels)
+
+@dataclass
+class MemoryMappedData:
+    def __init__(self, filepath: Path) -> None:
+        self.path = filepath
+        self.n_inputs: int
+        self.memmap: Tensor
+
+class ReplayBuffer:
+    """Maps the replay buffer to disk as a numpy memory-mapped array 
+    (essentially a ndarray). All operations using replay buffer is respective
+    to numpy and its arrays.
+    
+    The runtime folder should be cleared every run to prevent file name 
+    conflicts."""
+    INITIAL_CAPACITY = 256
+    def __init__(
+            self,
+            identifier: int | str,
+            path: Path,
+            dtype: torch.dtype = torch.float32
+    ) -> None:
+        self.dtype = dtype
+        self._features = MemoryMappedData(path / f'{identifier}_features.bin')
+        self._labels = MemoryMappedData(path / f'{identifier}_labels.bin')
+        self._length = 0
+        self._capacity = 0
+
+    def append(self, features: Tensor, labels: Tensor) -> None:
+        if not labels.nelement():
+            return
+
+        if not hasattr(self._labels, 'memmap'):
+            self._capacity = ReplayBuffer.INITIAL_CAPACITY
+            self._features.n_inputs = features.shape[1]
+            self._labels.n_inputs = 1
+            self._features.memmap = self._new_memmap(self._features, self._capacity)
+            self._labels.memmap = self._new_memmap(self._labels, self._capacity)
+
+        new_length = self._length + len(labels)
+        if new_length > self._capacity:
+            self._capacity = 1 << math.ceil(math.log2(new_length))
+            self._increase_memmap(self._features, self._capacity)
+            self._increase_memmap(self._labels, self._capacity)
+
+        self._features.memmap[self._length:new_length].copy_(features)
+        self._labels.memmap[self._length:new_length].copy_(labels)
+        self._length = new_length
+
+    def _increase_memmap(self, data_obj: MemoryMappedData, new_capacity: int) -> None:
+        new_memmap = self._new_memmap(data_obj, new_capacity)
+        new_memmap[:self._length].copy_(data_obj.memmap[:self._length])
+        data_obj.memmap = new_memmap
+
+    def _new_memmap(self, data_obj: MemoryMappedData, length: int) -> Tensor:
+        new_memmap = torch.from_file(
+            filename=str(data_obj.path),
+            shared=True,
+            # Takes number of elements, not rows
+            size=length * data_obj.n_inputs,
+            dtype=self.dtype
+        )
+        if data_obj.n_inputs > 1:
+            shape = (-1, data_obj.n_inputs)
+            new_memmap = new_memmap.reshape(shape)
+        return new_memmap
+
+    def sample(self, n_samples: int) -> tuple[Tensor, Tensor]:
+        if not self._length:
+            raise ValueError("Empty replay buffer.")
+        if n_samples > self._length:
+            raise ValueError("Sample size larger than replay buffer size.")
+
+        indices = torch.randperm(self._length)[:n_samples]
+        features = self._features.memmap[indices]
+        labels = self._labels.memmap[indices]
+        return features, labels
+
+    def __len__(self) -> int:
+        return self._length
+
+    def __bool__(self) -> bool:
+        return bool(self._length)

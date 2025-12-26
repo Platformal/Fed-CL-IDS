@@ -10,9 +10,6 @@ from pathlib import Path
 from time import time
 import os
 
-import pandas as pd
-import numpy as np
-
 from flwr.app import ArrayRecord, Context, Message, MetricRecord, RecordDict
 from flwr.clientapp import ClientApp
 
@@ -21,6 +18,7 @@ from opacus.optimizers.optimizer import DPOptimizer
 from torch.utils.data import DataLoader, TensorDataset
 from torch import Tensor
 import torch
+import pandas as pd
 
 from fed.continual_learning import ContinualLearning
 from fed.differential_privacy import DifferentialPrivacy
@@ -59,7 +57,8 @@ class Client:
 
         self.cl = ContinualLearning(
             er_filepath_identifier=os.getpid(), # or Node ID
-            er_runtime_directory=MAIN_PATH / 'runtime'
+            er_runtime_directory=MAIN_PATH / 'runtime',
+            device=self.config.device
         )
         self.dp = DifferentialPrivacy()
         # Only training nodes can fetch epsilon.
@@ -155,7 +154,6 @@ class Client:
                 original_dataset=train_set,
                 n_new_samples=len(train_set[1]),
                 ratio_old_samples=self.config.er_mix_ratio,
-                device=self.config.device
             )
 
         data_loader = DataLoader(
@@ -197,15 +195,13 @@ class Client:
             self.cl.er.add_data(
                 original_dataset=train_set,
                 sample_rate=self.config.er_sample_rate,
-                device=self.config.device
             )
 
             self.cl.ewc.update_fisher_information(
                 model=self.model,
                 train_set=train_set,
                 criterion=self.criterion,
-                batch_size=self.config.batch_size,
-                device=self.config.device
+                batch_size=self.config.batch_size
             )
             self.cl.ewc.update_prev_parameters(self.model)
 
@@ -235,8 +231,7 @@ class Client:
             if self.config.cl_enabled and not self.cl.ewc.is_empty():
                 batch_fisher_penalty = self.cl.ewc.calculate_penalty(
                     model=model,
-                    ewc_lambda=self.config.ewc_lambda,
-                    device=self.config.device
+                    ewc_lambda=self.config.ewc_lambda
                 )
                 loss += batch_fisher_penalty
 
@@ -268,7 +263,9 @@ class Client:
         packages = self._create_model_packages(data_loader)
         evaluation_model, _, data_loader = packages
 
-        all_predictions, all_probabilities, all_labels =  [], [], []
+        predictions_list: list[Tensor] = []
+        probabilities_list: list[Tensor] = []
+        labels_list: list[Tensor] =  []
         n_correct: int = 0
         total_loss: float = 0.0
         total_samples = 0
@@ -291,16 +288,16 @@ class Client:
                 total_loss += batch_loss.item() * len(batch_labels)
                 total_samples += len(batch_labels)
 
-                all_predictions.extend(predictions.cpu().numpy())
-                all_probabilities.extend(probabilities.cpu().numpy())
-                all_labels.extend(batch_labels.cpu().numpy())
+                predictions_list.append(predictions.cpu())
+                probabilities_list.append(probabilities.cpu())
+                labels_list.append(batch_labels.cpu())
 
         if self.config.dp_enabled:
             self.model = evaluation_model.to_standard_module()
 
-        all_predictions = np.array(all_predictions)
-        all_probabilities = np.array(all_probabilities)
-        all_labels = np.array(all_labels)
+        all_predictions = torch.cat(predictions_list)
+        all_probabilities = torch.cat(probabilities_list)
+        all_labels = torch.cat(labels_list)
         training_epsilon = -1 # Default sentinel value
         if self.stored_epsilon is not None:
             training_epsilon = self.stored_epsilon
