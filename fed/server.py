@@ -17,7 +17,7 @@ from flwr.serverapp.strategy import Result
 from flwr.serverapp import Grid, ServerApp
 
 from sklearn.model_selection import train_test_split
-from fed.custom_strategies import UAVIDSFedAvg
+from fed.custom_strategies import FedCLIDSAvg
 from models.fed_metrics import FedMetrics
 from models.mlp import MLP
 
@@ -46,7 +46,7 @@ class Server:
     and federated aggregation method."""
     def __init__(self, grid: Grid, context: Context) -> None:
         self.config = ServerConfiguration(grid, context)
-        self.federated_model = UAVIDSFedAvg(
+        self.federated_model = FedCLIDSAvg(
             fraction_train=self.config.fraction_train,
             fraction_eval=self.config.fraction_evaluate,
             num_rounds=self.config.n_rounds

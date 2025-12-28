@@ -16,7 +16,7 @@ from flwr.server import Grid
 from torch import Tensor
 import torch
 
-class UAVIDSFedAvg(FedAvg):
+class FedCLIDSAvg(FedAvg):
     def __init__(
             self,
             fraction_train: float,
@@ -58,7 +58,7 @@ class UAVIDSFedAvg(FedAvg):
         config['server-round'] = server_round
 
         record = RecordDict({
-            self.arrayrecord_key: arrays, 
+            self.arrayrecord_key: arrays,
             self.configrecord_key: config
         })
         messages = self._construct_messages(record, self.train_node_ids, MessageType.TRAIN)
@@ -74,7 +74,8 @@ class UAVIDSFedAvg(FedAvg):
     def average_evaluate_metrics(
             self,
             records: list[RecordDict],
-            weighting_metric_name: str) -> MetricRecord:
+            weighting_metric_name: str
+    ) -> MetricRecord:
         """Perform weighted aggregation all MetricRecords using a specific key."""
         aggregated_metrics = MetricRecord()
         for record in records:
@@ -331,10 +332,7 @@ def str_config(config: ConfigRecord) -> str:
     all_config_str: list[str] = []
     for key, value in config.items():
         # Poorly written I know...
-        try:
-            value = json.loads(value)
-        except:
-            pass
+        value = json.loads(value)
         if isinstance(value, bytes):
             string = f"'{key}': '<bytes>'"
         elif isinstance(value, list):

@@ -4,7 +4,7 @@ Performs both training and evaluation with a local pytorch MLP module that gets
 its parameters from the server module.
 """
 from typing import Callable, Optional
-from collections import OrderedDict
+from collections import OrderedDict # Optional
 from dataclasses import dataclass
 from pathlib import Path
 from time import time

@@ -2,7 +2,6 @@
 and elastic weight consolidation."""
 from dataclasses import dataclass
 from pathlib import Path
-import math
 
 from opacus.grad_sample.grad_sample_module import GradSampleModule
 from torch.utils.data import DataLoader, TensorDataset
@@ -200,7 +199,7 @@ class ReplayBuffer:
     
     The runtime folder should be cleared every run to prevent file name 
     conflicts."""
-    INITIAL_CAPACITY = 256
+    INITIAL_CAPACITY = 512
     def __init__(
             self,
             identifier: int | str,
@@ -226,7 +225,7 @@ class ReplayBuffer:
 
         new_length = self._length + len(labels)
         if new_length > self._capacity:
-            self._capacity = 1 << math.ceil(math.log2(new_length))
+            self._capacity = 1 << new_length.bit_length() # Next power of 2
             self._increase_memmap(self._features, self._capacity)
             self._increase_memmap(self._labels, self._capacity)
 
