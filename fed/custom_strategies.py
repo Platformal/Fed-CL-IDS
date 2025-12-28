@@ -1,4 +1,4 @@
-from typing import Callable, Optional, Iterable
+from typing import Callable, Optional, Iterable, Container, cast
 from collections import OrderedDict
 from logging import INFO
 import json
@@ -71,29 +71,6 @@ class FedCLIDSAvg(FedAvg):
             message.content = client_content
         return messages
 
-    def average_evaluate_metrics(
-            self,
-            records: list[RecordDict],
-            weighting_metric_name: str
-    ) -> MetricRecord:
-        """Perform weighted aggregation all MetricRecords using a specific key."""
-        aggregated_metrics = MetricRecord()
-        for record in records:
-            for record_item in record.metric_records.values():
-                # aggregate in-place
-                for key, value in record_item.items(): # accuracy, loss, pr-auc
-                    # We exclude the weighting key from the aggregated MetricRecord
-                    if (key == weighting_metric_name
-                        or (key == 'epsilon' and value < 0)):
-                        continue
-                    values_list = aggregated_metrics.get(key, [])
-                    values_list.append(value)
-                    aggregated_metrics[key] = values_list
-        for key, values_list in aggregated_metrics.items():
-            aggregated_metrics[key] = sum(values_list) / len(values_list)
-        aggregated_metrics['epsilon'] = aggregated_metrics.get('epsilon', -1)
-        return aggregated_metrics
-
     def aggregate_evaluate(
         self,
         server_round: int,
@@ -105,7 +82,8 @@ class FedCLIDSAvg(FedAvg):
         if valid_replies:
             reply_contents = [msg.content for msg in valid_replies]
             # Aggregate MetricRecords
-            metrics = self.average_evaluate_metrics(reply_contents, self.weighted_by_key)
+            # metrics = self.average_evaluate_metrics(reply_contents, self.weighted_by_key)
+            metrics = aggregate_metricrecords(reply_contents, self.weighted_by_key)
         return metrics
 
     def configure_evaluate(
@@ -327,21 +305,77 @@ class FedCLIDSAvg(FedAvg):
         )
         return array_record, metrics
 
-def str_config(config: ConfigRecord) -> str:
-    """Ensures start log does not print all elements in flows"""
-    all_config_str: list[str] = []
-    for key, value in config.items():
-        # Poorly written I know...
-        value = json.loads(value)
-        if isinstance(value, bytes):
-            string = f"'{key}': '<bytes>'"
-        elif isinstance(value, list):
-            string = f"'{key}': length = {len(value)}"
-        else:
-            string = f"'{key}': '{value}'"
-        all_config_str.append(string)
-    content = ', '.join(all_config_str)
-    return f"{{{content}}}"
+def aggregate_metricrecords(
+    records: list[RecordDict],
+    weighting_metric_name: str
+) -> MetricRecord:
+    """
+    Modified weighted aggregation of MetricRecords using a specific key.
+    Separates the main aggregation and the partial aggregation of epsilon
+    for Fed-CL-IDS.
+    """
+    metric_records = [
+        # Get the first (and only) MetricRecord in the record
+        next(iter(record.metric_records.values()))
+        for record in records
+    ]
+    weights: list[float] = [
+        # Because replies have been checked for consistency,
+        # we can safely cast the weighting factor to float
+        cast(float, metric_dict[weighting_metric_name])
+        for metric_dict in metric_records
+    ]
+    total_weight = sum(weights)
+    weight_factors = [w / total_weight for w in weights]
+    aggregated_metrics = _aggregation(
+        metric_records=metric_records,
+        weight_factors=weight_factors,
+        ignored_keys=(weighting_metric_name, 'epsilon')
+    )
+
+    # Writes the epsilon value since the other function would aggregate
+    # the sentinel value (-1)
+    epsilon_metrics = list(filter(
+        lambda metric_dict: cast(float, metric_dict['epsilon']) >= 0,
+        metric_records
+    ))
+    epsilon_weights: list[float] = [
+        cast(float, metric_dict[weighting_metric_name])
+        for metric_dict in epsilon_metrics
+    ]
+    total_epsilon_weight = sum(epsilon_weights)
+    epsilon_weight_factors = [w / total_epsilon_weight for w in epsilon_weights]
+    aggregated_epsilon = _aggregation(
+        metric_records=epsilon_metrics,
+        weight_factors=epsilon_weight_factors,
+        ignored_keys=(weighting_metric_name,)
+    )
+    aggregated_metrics['epsilon'] = aggregated_epsilon['epsilon']
+    return aggregated_metrics
+
+def _aggregation(
+        metric_records: Iterable[MetricRecord],
+        weight_factors: Iterable[float],
+        ignored_keys: Container[str]
+) -> MetricRecord:
+    aggregated_metrics = MetricRecord()
+    for metric_dict, weight in zip(metric_records, weight_factors):
+        for key, value in metric_dict.items():
+            if key in ignored_keys:
+                continue
+            value_type = list[float] if isinstance(value, list) else float
+            aggregated_value = aggregated_metrics.get(key, value_type())
+            if isinstance(value, list):
+                aggregated_value = cast(list[float], aggregated_value)
+                aggregated_value = aggregated_value or [0.0] * len(value)
+                aggregated_metrics[key] = [
+                    agg_val + val * weight
+                    for agg_val, val in zip(aggregated_value, value)
+                ]
+                continue
+            agg_val = cast(float, aggregated_value)
+            aggregated_metrics[key] = agg_val + value * weight
+    return aggregated_metrics
 
 def log_strategy_start_info(
     num_rounds: int,
@@ -349,7 +383,10 @@ def log_strategy_start_info(
     train_config: Optional[ConfigRecord],
     evaluate_config: Optional[ConfigRecord],
 ) -> None:
-    """Log information about the strategy start."""
+    """
+    Log information about the strategy start. Modified to prevent
+    printing list of flows.
+    """
     log(INFO, "\t├── Number of rounds: %d", num_rounds)
     log(
         INFO,
@@ -366,3 +403,19 @@ def log_strategy_start_info(
         "\t├── ConfigRecord (evaluate): %s",
         str_config(evaluate_config) if evaluate_config else "(empty!)",
     )
+
+def str_config(config: ConfigRecord) -> str:
+    """Ensures start log does not print all elements in flows"""
+    all_config_str: list[str] = []
+    for key, value in config.items():
+        # Poorly written I know...
+        value = json.loads(value)
+        if isinstance(value, bytes):
+            string = f"'{key}': '<bytes>'"
+        elif isinstance(value, list):
+            string = f"'{key}': length = {len(value)}"
+        else:
+            string = f"'{key}': '{value}'"
+        all_config_str.append(string)
+    content = ', '.join(all_config_str)
+    return f"{{{content}}}"
