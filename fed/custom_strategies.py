@@ -69,12 +69,15 @@ class FedCLIDSAvg(FedAvg):
             client_content['config'] = client_content['config'].copy()
             client_content['config']['flows'] = flows[i]
             message.content = client_content
+        messages = cast(list[Message], messages)
+        messages[0].content['config']['profile_on'] = 1
         return messages
 
     def aggregate_evaluate(
-        self,
-        server_round: int,
-        replies: Iterable[Message]) -> Optional[MetricRecord]:
+            self,
+            server_round: int,
+            replies: Iterable[Message]
+    ) -> Optional[MetricRecord]:
         """Aggregate MetricRecords in the received Messages."""
         valid_replies, _ = self._check_and_log_replies(replies, is_train=False)
 

@@ -1,5 +1,5 @@
 """Starts federated learning from simulation and configuration file"""
-from typing import Optional, Iterable
+from typing import Optional, Iterable, cast
 from collections import OrderedDict
 from dataclasses import dataclass
 from pathlib import Path
@@ -52,7 +52,7 @@ class Server:
             num_rounds=self.config.n_rounds
         )
         self.current_parameters = self._initial_parameters(context)
-        self.total_epsilon = 0.0 if self.config.dp_enabled else None
+        self.total_epsilon = 0.0
         self.dataframe: pd.DataFrame
         self.dataframe_path: Optional[Path] = None
 
@@ -178,7 +178,7 @@ def clear_directory(filepath: Path) -> None:
     :param path: Path to the folder
     :type path: Path
     """
-    for file in filter(lambda x: x.is_file(), filepath.iterdir()):
+    for file in filter(Path.is_file, filepath.iterdir()):
         file.unlink()
 
 def get_uavids(server: Server, filepath: Path) -> dict[str, list[int]]:
@@ -213,10 +213,10 @@ def log_results(
     rounds_eval_metrics = list(result.evaluate_metrics_clientapp.values())
     daily_metrics.append(rounds_eval_metrics)
 
-    sum_epsilon_day: Optional[float] = None
+    sum_epsilon_day = 0.0
     if server.config.dp_enabled:
         sum_epsilon_day = sum(
-            float(round_metric['epsilon'])
+            cast(float, round_metric['epsilon'])
             for round_metric in result.evaluate_metrics_clientapp.values()
         )
         server.total_epsilon += sum_epsilon_day
@@ -227,7 +227,7 @@ def log_results(
             f"Day {day}"
             f" | {server.config.n_train_clients}/{server.config.total_clients} train"
             f" | Rounds: {n_rounds}"
-            f" | Day Epsilon: {sum_epsilon_day}"
-            f" | Total Epsilon: {server.total_epsilon}"
+            f" | Day Epsilon: {sum_epsilon_day if server.config.dp_enabled else None}"
+            f" | Total Epsilon: {server.total_epsilon if server.config.dp_enabled else None}"
             f" | {str(eval_metrics)}\n"
         )

@@ -61,7 +61,7 @@ class ElasticWeightConsolidation:
     ) -> None:
         """
         Calculates the fisher diagonal from the current model
-        and training data.
+        and training data. Does not modify the model
         
         :param train_set: Same features and labels used in training the model.
         :type train_set: tuple[Tensor, Tensor]
@@ -140,8 +140,9 @@ class ExperienceReplay:
             self,
             original_dataset: tuple[Tensor, Tensor],
             n_new_samples: int,
-            ratio_old_samples: float,
+            ratio_old_samples: float
     ) -> tuple[Tensor, Tensor]:
+        """Returns random tensors on CPU"""
         if not ratio_old_samples or not n_new_samples:
             return original_dataset
         if ratio_old_samples >= 1.00:
@@ -153,34 +154,23 @@ class ExperienceReplay:
             return original_dataset
         # Ratio will be off until replay buffer size >= replay sample size
         new_dataset = self._buffer.sample(actual_size)
-        return self._concat_datasets(original_dataset, new_dataset)
-
-    def _concat_datasets(
-            self,
-            tensor_data: tuple[Tensor, Tensor],
-            sampled_tensors: tuple[Tensor, Tensor],
-    ) -> tuple[Tensor, Tensor]:
-        new_tensors = tuple(map(lambda x: x.to(self.device), sampled_tensors))
-        features, labels = map(torch.cat, zip(tensor_data, new_tensors))
+        deviced_dataset = tuple(map(lambda x: x.to(self.device), new_dataset))
+        features, labels = map(torch.cat, zip(original_dataset, deviced_dataset))
         return features, labels
 
     def add_data(
             self,
             original_dataset: tuple[Tensor, Tensor],
-            sample_rate: float,
+            sample_rate: float
     ) -> None:
+        """Add to replay buffer. All tensors need to be on CPU"""
         # Prefer exact n_samples than random per sampling
         features, labels = original_dataset
         n_dataset_samples = len(labels)
         if n_samples := int(n_dataset_samples * sample_rate):
-            selected = torch.randint(
-                0, n_dataset_samples,
-                size=(n_samples,),
-                device=self.device
-            )
+            selected = torch.randint(0, n_dataset_samples, size=(n_samples,))
         else:
-            uniform_values = torch.rand((n_dataset_samples,), device=self.device)
-            selected = uniform_values <= sample_rate
+            selected = torch.rand(size=(n_dataset_samples,)) <= sample_rate
         selected_features = features[selected].cpu().detach()
         selected_labels = labels[selected].cpu().detach()
         self._buffer.append(selected_features, selected_labels)
@@ -199,7 +189,7 @@ class ReplayBuffer:
     
     The runtime folder should be cleared every run to prevent file name 
     conflicts."""
-    INITIAL_CAPACITY = 512
+    INITIAL_CAPACITY = 1024
     def __init__(
             self,
             identifier: int | str,

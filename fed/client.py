@@ -15,6 +15,7 @@ from flwr.clientapp import ClientApp
 
 from opacus.grad_sample.grad_sample_module import GradSampleModule
 from opacus.optimizers.optimizer import DPOptimizer
+from torch.profiler import profile, record_function, ProfilerActivity
 from torch.utils.data import DataLoader, TensorDataset
 from torch import Tensor
 import torch
@@ -125,18 +126,13 @@ class Client:
         filtered = self.dataframe.loc[flow_ids]
         features, labels = filtered.drop('label', axis=1), filtered['label']
         np_features = features.to_numpy('float32')
-        np_labels = labels.to_numpy('uint8')
+        np_labels = labels.to_numpy(bool).astype('float32')
 
         tensor_features = torch.from_numpy(np_features).to(self.config.device)
-        tensor_labels = (
-            torch.from_numpy(np_labels)
-            .bool()
-            .float()
-            .to(self.config.device)
-        )
+        tensor_labels = torch.from_numpy(np_labels).to(self.config.device)
         return tensor_features, tensor_labels
 
-    def train(self, train_set: tuple[Tensor, Tensor]) -> float:
+    def train(self, train_set: tuple[Tensor, Tensor], profile_on) -> float:
         """
         Trains local model modified by the toml configuration file 
         (such as continual learning and differential privacy), 
@@ -147,13 +143,25 @@ class Client:
         :return: Training loss of model.
         :rtype: float
         """
-        self.model.train()
+        profile_on = False
+        if profile_on:
+            activities = [ProfilerActivity.CPU, ProfilerActivity.CUDA]
+            with profile(activities=activities, record_shapes=True, profile_memory=True) as prof:
+                result = self._train(train_set)
+            (MAIN_PATH / 'runtime' / 'trace.txt').write_text(
+                prof.key_averages().table(sort_by='cpu_time_total')
+            )
+        else:
+            result = self._train(train_set)
+        return result
 
+    def _train(self, train_set: tuple[Tensor, Tensor]) -> float:
+        self.model.train()
         if self.config.cl_enabled:
             train_set = self.cl.er.sample_replay_buffer(
                 original_dataset=train_set,
                 n_new_samples=len(train_set[1]),
-                ratio_old_samples=self.config.er_mix_ratio,
+                ratio_old_samples=self.config.er_mix_ratio
             )
 
         data_loader = DataLoader(
@@ -171,17 +179,20 @@ class Client:
             cosine_epochs=len(data_loader) * self.config.epochs
         )
 
-        total_loss: float = 0.0
+        # Total_loss is mutated in _train_iteraton()
+        total_loss: Tensor = torch.tensor(
+            0.0, dtype=torch.float32, device=self.config.device
+        )
         total_samples: int = 0
         loop_start = time()
         for _ in range(self.config.epochs):
-            loss, n_samples = self._train_iteration(
+            n_samples = self._train_iteration(
                 model=training_model,
                 optimizer=optimizer,
                 scheduler=scheduler,
-                data_loader=data_loader
+                data_loader=data_loader,
+                total_loss=total_loss
             )
-            total_loss += loss
             total_samples += n_samples
         print(f"Training Loop: {time() - loop_start} sec")
 
@@ -194,9 +205,8 @@ class Client:
         if self.config.cl_enabled:
             self.cl.er.add_data(
                 original_dataset=train_set,
-                sample_rate=self.config.er_sample_rate,
+                sample_rate=self.config.er_sample_rate
             )
-
             self.cl.ewc.update_fisher_information(
                 model=self.model,
                 train_set=train_set,
@@ -204,28 +214,28 @@ class Client:
                 batch_size=self.config.batch_size
             )
             self.cl.ewc.update_prev_parameters(self.model)
-
         average_loss = total_loss / max(1, total_samples)
-        return average_loss
+        return average_loss.item()
 
     def _train_iteration(
             self,
             model: MLP | GradSampleModule,
             optimizer: Adam | DPOptimizer,
             scheduler: CosineAnnealingLR,
-            data_loader: DataLoader
-    ) -> tuple[float, int]:
-        sum_loss: float = 0.0
+            data_loader: DataLoader,
+            total_loss: Tensor
+    ) -> int:
         n_samples: int = 0
         for batch_features, batch_labels in data_loader:
-            # Poisson sampling could produce empty batch
             if not batch_labels.nelement():
                 continue
             batch_features: Tensor
             batch_labels: Tensor
+            # Poisson sampling could produce empty batch
 
             outputs: Tensor = model(batch_features) # Forward pass
             outputs = outputs.squeeze(1)
+            # Returns single scalar
             loss: Tensor = self.criterion(outputs, batch_labels)
 
             if self.config.cl_enabled and not self.cl.ewc.is_empty():
@@ -235,16 +245,15 @@ class Client:
                 )
                 loss += batch_fisher_penalty
 
+            optimizer.zero_grad() # Prevents gradient accumulation
             loss.backward() # Calculate where to step using mini-batch SGD
             optimizer.step() # Step forward down gradient
-            scheduler.step() # Adjust learning rate
-            # Prevents gradient accumulation for next iteration
-            optimizer.zero_grad()
+            scheduler.step() # Adjusts learning rate
 
             batch_size = len(batch_labels)
-            sum_loss += loss.item() * batch_size
+            total_loss.add_(loss.detach() * batch_size)
             n_samples += batch_size
-        return sum_loss, n_samples
+        return n_samples
 
     def evaluate(self, test_set: tuple[Tensor, Tensor]) -> dict[str, float]:
         """
@@ -266,8 +275,12 @@ class Client:
         predictions_list: list[Tensor] = []
         probabilities_list: list[Tensor] = []
         labels_list: list[Tensor] =  []
-        n_correct: int = 0
-        total_loss: float = 0.0
+        n_correct = torch.tensor(
+            0.0, dtype=torch.float32, device=self.config.device
+        )
+        total_loss = torch.tensor(
+            0.0, dtype=torch.float32, device=self.config.device
+        )
         total_samples = 0
 
         with torch.no_grad():
@@ -283,28 +296,28 @@ class Client:
                 predictions: Tensor = (probabilities >= 0.5).float()
 
                 n_batch_correct: Tensor = (predictions == batch_labels).sum()
-                n_correct += int(n_batch_correct.item())
+                n_correct.add_(n_batch_correct)
                 batch_loss: Tensor = self.criterion(outputs, batch_labels)
-                total_loss += batch_loss.item() * len(batch_labels)
+                total_loss.add_(batch_loss * len(batch_labels))
                 total_samples += len(batch_labels)
 
-                predictions_list.append(predictions.cpu())
-                probabilities_list.append(probabilities.cpu())
-                labels_list.append(batch_labels.cpu())
+                predictions_list.append(predictions)
+                probabilities_list.append(probabilities)
+                labels_list.append(batch_labels)
 
         if self.config.dp_enabled:
             self.model = evaluation_model.to_standard_module()
 
-        all_predictions = torch.cat(predictions_list)
-        all_probabilities = torch.cat(probabilities_list)
-        all_labels = torch.cat(labels_list)
+        all_predictions = torch.cat(predictions_list).cpu()
+        all_probabilities = torch.cat(probabilities_list).cpu()
+        all_labels = torch.cat(labels_list).cpu()
         training_epsilon = -1 # Default sentinel value
         if self.stored_epsilon is not None:
             training_epsilon = self.stored_epsilon
             self.stored_epsilon = None
         metrics = {
-            'accuracy': n_correct / total_samples,
-            'loss': total_loss / total_samples,
+            'accuracy': (n_correct / total_samples).item(),
+            'loss': (total_loss / total_samples).item(),
             'roc-auc': FedMetrics.roc_auc(all_labels, all_probabilities),
             'pr-auc': FedMetrics.pr_auc(all_labels, all_probabilities),
             'macro-f1': FedMetrics.macro_f1(all_labels, all_predictions),
@@ -328,7 +341,7 @@ class Client:
             optimizer=self.model.get_optimizer(),
             data_loader=data_loader,
             noise_multiplier=self.config.noise,
-            max_grad_norm=self.config.clipping, # Clipping value
+            max_grad_norm=self.config.clipping # Clipping value
         )
         if is_evaluating:
             dp_model.eval()
@@ -365,14 +378,14 @@ def client_train(client: Client, msg: Message) -> Message:
     and trained model parameters.
     :rtype: Message
     """
+    profile_on = 'profile_on' in msg.content['config']
     new_parameters = msg.content['arrays'].to_torch_state_dict()
     client.update_model(new_parameters)
     dataframe_path = MAIN_PATH / 'datasets' / 'UAVIDS-2025 Preprocessed.csv'
     client.set_dataframe(dataframe_path)
     flow_ids: list[int] = msg.content['config']['flows']
     train_set = client.get_flow_data(flow_ids)
-
-    average_loss = client.train(train_set)
+    average_loss = client.train(train_set, profile_on)
     # state_dict() auto detaches, still would be on cuda
     client_array_record = ArrayRecord(OrderedDict(client.model.state_dict()))
     metrics = {
