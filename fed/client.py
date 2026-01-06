@@ -35,20 +35,20 @@ class ClientConfiguration:
     def __init__(self, context: Context) -> None:
         device_str = 'cuda' if torch.cuda.is_available() else 'cpu'
         self.device = torch.device(device_str)
-        self.epochs = int(context.run_config['epochs'])
-        self.batch_size = int(context.run_config['batch-size'])
+        self.epochs = cast(int, context.run_config['epochs'])
+        self.batch_size = cast(int, context.run_config['batch-size'])
 
         # Experience replay
-        self.cl_enabled = bool(context.run_config['cl-enabled'])
-        self.er_sample_rate = float(context.run_config['er-memory'])
-        self.er_mix_ratio = float(context.run_config['er-mix-ratio'])
-        self.ewc_lambda = float(context.run_config['ewc-lambda'])
+        self.cl_enabled = cast(bool, context.run_config['cl-enabled'])
+        self.er_sample_rate = cast(float, context.run_config['er-memory'])
+        self.er_mix_ratio = cast(float, context.run_config['er-mix-ratio'])
+        self.ewc_lambda = cast(float, context.run_config['ewc-lambda'])
 
         # Differential privacy
-        self.dp_enabled = bool(context.run_config['dp-enabled'])
-        self.clipping = float(context.run_config['clipping'])
-        self.noise = float(context.run_config['noise'])
-        self.delta = float(context.run_config['delta'])
+        self.dp_enabled = cast(bool, context.run_config['dp-enabled'])
+        self.clipping = cast(float, context.run_config['clipping'])
+        self.noise = cast(float, context.run_config['noise'])
+        self.delta = cast(float, context.run_config['delta'])
 
 class Client:
     """Acts as an interactive instance of a client."""
@@ -71,14 +71,14 @@ class Client:
         self.dataframe_path: Optional[Path] = None
 
     def _initialize_model(self, context: Context) -> MLP:
-        widths = str(context.run_config['mlp-widths'])
+        widths = cast(str, context.run_config['mlp-widths'])
         model = MLP(
-            n_features=int(context.run_config['n-features']),
+            n_features=cast(int, context.run_config['n-features']),
             hidden_widths=map(int, widths.split(',')),
-            dropout=float(context.run_config['mlp-dropout']),
-            weight_decay=float(context.run_config['mlp-weight-decay']),
-            lr_max=float(context.run_config['mlp-lr-max']),
-            lr_min=float(context.run_config['mlp-lr-min'])
+            dropout=cast(float, context.run_config['mlp-dropout']),
+            weight_decay=cast(float, context.run_config['mlp-weight-decay']),
+            lr_max=cast(float, context.run_config['mlp-lr-max']),
+            lr_min=cast(float, context.run_config['mlp-lr-min'])
         )
         return model.to(self.config.device)
 
@@ -147,7 +147,7 @@ class Client:
         profile_on = False
         if profile_on:
             activities = [ProfilerActivity.CPU, ProfilerActivity.CUDA]
-            with profile(activities=activities, record_shapes=True, profile_memory=True) as prof:
+            with profile(activities=activities, profile_memory=True) as prof:
                 result = self._train(train_set)
             (MAIN_PATH / 'runtime' / 'trace.txt').write_text(
                 prof.key_averages().table(sort_by='cpu_time_total')
@@ -226,15 +226,14 @@ class Client:
         n_samples: int = 0
         iteration_loss = self._zero_tensor()
         for batch_features, batch_labels in data_loader:
+            # Poisson sampling could produce empty batch
             if not batch_labels.nelement():
                 continue
             batch_features: Tensor
             batch_labels: Tensor
-            # Poisson sampling could produce empty batch
 
             outputs: Tensor = model(batch_features) # Forward pass
             outputs = outputs.squeeze(1)
-            # Returns single scalar
             loss: Tensor = self.criterion(outputs, batch_labels)
 
             if self.config.cl_enabled and not self.cl.ewc.is_empty():
@@ -250,8 +249,8 @@ class Client:
             scheduler.step() # Adjusts learning rate
 
             batch_size = len(batch_labels)
-            iteration_loss += loss.detach() * batch_size
             n_samples += batch_size
+            iteration_loss += loss.detach() * batch_size
         return iteration_loss, n_samples
 
     def evaluate(self, test_set: tuple[Tensor, Tensor]) -> dict[str, float]:
@@ -271,9 +270,10 @@ class Client:
         packages = self._create_model_packages(data_loader)
         evaluation_model, _, data_loader = packages
 
+        labels_list: list[Tensor] =  []
         predictions_list: list[Tensor] = []
         probabilities_list: list[Tensor] = []
-        labels_list: list[Tensor] =  []
+
         n_correct = self._zero_tensor()
         total_loss = self._zero_tensor()
         total_samples = 0
@@ -287,25 +287,25 @@ class Client:
 
                 outputs: Tensor = evaluation_model(batch_features)
                 outputs = outputs.squeeze(1)
-                probabilities: Tensor = torch.sigmoid(outputs)
-                predictions: Tensor = (probabilities >= 0.5).float()
+                batch_probabilities = torch.sigmoid(outputs)
+                batch_predictions = (batch_probabilities >= 0.5).float()
 
-                n_batch_correct: Tensor = (predictions == batch_labels).sum()
+                n_batch_correct = (batch_predictions == batch_labels).sum()
                 n_correct += n_batch_correct
                 batch_loss: Tensor = self.criterion(outputs, batch_labels)
                 total_loss += batch_loss * len(batch_labels)
                 total_samples += len(batch_labels)
 
-                predictions_list.append(predictions)
-                probabilities_list.append(probabilities)
                 labels_list.append(batch_labels)
+                predictions_list.append(batch_predictions)
+                probabilities_list.append(batch_probabilities)
 
         if isinstance(evaluation_model, GradSampleModule):
             self.model = cast(MLP, evaluation_model.to_standard_module())
 
-        all_predictions = torch.cat(predictions_list).cpu()
-        all_probabilities = torch.cat(probabilities_list).cpu()
-        all_labels = torch.cat(labels_list).cpu()
+        predictions = torch.cat(predictions_list).cpu()
+        probabilities = torch.cat(probabilities_list).cpu()
+        labels = torch.cat(labels_list).cpu()
         training_epsilon = -1 # Default sentinel value
         if self.stored_epsilon is not None:
             training_epsilon = self.stored_epsilon
@@ -313,14 +313,10 @@ class Client:
         metrics = {
             'accuracy': (n_correct / total_samples).item(),
             'loss': (total_loss / total_samples).item(),
-            'roc-auc': FedMetrics.roc_auc(all_labels, all_probabilities),
-            'pr-auc': FedMetrics.pr_auc(all_labels, all_probabilities),
-            'macro-f1': FedMetrics.macro_f1(all_labels, all_predictions),
-            'recall@fpr=1%': FedMetrics.recall_at_fpr(
-                labels=all_labels,
-                probabilities=all_probabilities,
-                target_fpr=0.01
-            ),
+            'roc-auc': FedMetrics.roc_auc(labels, probabilities),
+            'pr-auc': FedMetrics.pr_auc(labels, probabilities),
+            'macro-f1': FedMetrics.macro_f1(labels, predictions),
+            'recall@fpr=1%': FedMetrics.recall_at_fpr(labels, probabilities, 0.01),
             'epsilon': training_epsilon
         }
         return metrics
@@ -388,7 +384,7 @@ def client_train(client: Client, msg: Message) -> Message:
     flow_ids = cast(list[int], msg.content['config']['flows'])
     train_set = client.get_flow_data(flow_ids)
     average_loss = client.train(train_set, profile_on)
-    # state_dict() auto detaches, still would be on cuda
+    # state_dict() auto detaches from grad, but still it's on cuda
     client_parameters = cast(OrderedDict, client.model.state_dict())
     metrics = {
         'train_loss': average_loss,

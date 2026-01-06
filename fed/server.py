@@ -31,15 +31,15 @@ OUTPUT_PATH = MAIN_PATH / 'outputs'
 class ServerConfiguration:
     """Stores configurations from pyproject.toml"""
     def __init__(self, grid: Grid, context: Context) -> None:
-        self.fraction_train = float(context.run_config['fraction-train'])
-        self.fraction_evaluate = float(context.run_config['fraction-evaluate'])
+        self.fraction_train = cast(float, context.run_config['fraction-train'])
+        self.fraction_evaluate = cast(float, context.run_config['fraction-evaluate'])
         self.total_clients = len(list(grid.get_node_ids()))
         self.n_train_clients = int(self.total_clients * self.fraction_train)
         self.n_evaluate_clients = int(self.total_clients * self.fraction_evaluate)
 
-        self.n_days = int(context.run_config['max-days'])
-        self.n_rounds = int(context.run_config['n-rounds'])
-        self.dp_enabled = bool(context.run_config['dp-enabled'])
+        self.n_days = cast(int, context.run_config['max-days'])
+        self.n_rounds = cast(int, context.run_config['n-rounds'])
+        self.dp_enabled = cast(bool, context.run_config['dp-enabled'])
 
 class Server:
     """Main class holding configurations, main model parameters, 
@@ -57,14 +57,14 @@ class Server:
         self.dataframe_path: Optional[Path] = None
 
     def _initial_parameters(self, context: Context) -> OrderedDict[str, Tensor]:
-        widths = str(context.run_config['mlp-widths'])
+        widths = cast(str, context.run_config['mlp-widths'])
         model = MLP(
-            n_features=int(context.run_config['n-features']),
+            n_features=cast(int, context.run_config['n-features']),
             hidden_widths=map(int, widths.split(',')),
-            dropout=float(context.run_config['mlp-dropout']),
-            weight_decay=float(context.run_config['mlp-weight-decay']),
-            lr_max=float(context.run_config['mlp-lr-max']),
-            lr_min=float(context.run_config['mlp-lr-min'])
+            dropout=cast(float, context.run_config['mlp-dropout']),
+            weight_decay=cast(float, context.run_config['mlp-weight-decay']),
+            lr_max=cast(float, context.run_config['mlp-lr-max']),
+            lr_min=cast(float, context.run_config['mlp-lr-min'])
         )
         return OrderedDict(model.state_dict())
 
