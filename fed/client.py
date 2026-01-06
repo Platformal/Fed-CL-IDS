@@ -3,14 +3,15 @@ Representation of a client/supernode in a federated framework.
 Performs both training and evaluation with a local pytorch MLP module that gets
 its parameters from the server module.
 """
-from typing import Callable, Optional
-from collections import OrderedDict # Optional
+from typing import Callable, Optional, cast
+from collections import OrderedDict
 from dataclasses import dataclass
 from pathlib import Path
 from time import time
 import os
 
 from flwr.app import ArrayRecord, Context, Message, MetricRecord, RecordDict
+from flwr.common.typing import MetricRecordValues
 from flwr.clientapp import ClientApp
 
 from opacus.grad_sample.grad_sample_module import GradSampleModule
@@ -179,9 +180,11 @@ class Client:
             cosine_epochs=len(data_loader) * self.config.epochs
         )
 
-        # Total_loss is mutated in _train_iteraton()
+        # Total_loss is mutated in _train_iteration()
         total_loss: Tensor = torch.tensor(
-            0.0, dtype=torch.float32, device=self.config.device
+            0.0,
+            dtype=torch.float32,
+            device=self.config.device
         )
         total_samples: int = 0
         loop_start = time()
@@ -276,10 +279,14 @@ class Client:
         probabilities_list: list[Tensor] = []
         labels_list: list[Tensor] =  []
         n_correct = torch.tensor(
-            0.0, dtype=torch.float32, device=self.config.device
+            0.0,
+            dtype=torch.float32,
+            device=self.config.device
         )
         total_loss = torch.tensor(
-            0.0, dtype=torch.float32, device=self.config.device
+            0.0,
+            dtype=torch.float32,
+            device=self.config.device
         )
         total_samples = 0
 
@@ -322,7 +329,9 @@ class Client:
             'pr-auc': FedMetrics.pr_auc(all_labels, all_probabilities),
             'macro-f1': FedMetrics.macro_f1(all_labels, all_predictions),
             'recall@fpr=1%': FedMetrics.recall_at_fpr(
-                all_labels, all_probabilities, 0.01
+                labels=all_labels,
+                probabilities=all_probabilities,
+                target_fpr=0.01
             ),
             'epsilon': training_epsilon
         }
@@ -379,21 +388,21 @@ def client_train(client: Client, msg: Message) -> Message:
     :rtype: Message
     """
     profile_on = 'profile_on' in msg.content['config']
-    new_parameters = msg.content['arrays'].to_torch_state_dict()
-    client.update_model(new_parameters)
+    server_parameters = msg.content['arrays'].to_torch_state_dict()
+    client.update_model(server_parameters)
     dataframe_path = MAIN_PATH / 'datasets' / 'UAVIDS-2025 Preprocessed.csv'
     client.set_dataframe(dataframe_path)
-    flow_ids: list[int] = msg.content['config']['flows']
+    flow_ids = cast(list[int], msg.content['config']['flows'])
     train_set = client.get_flow_data(flow_ids)
     average_loss = client.train(train_set, profile_on)
     # state_dict() auto detaches, still would be on cuda
-    client_array_record = ArrayRecord(OrderedDict(client.model.state_dict()))
+    client_parameters = cast(OrderedDict, client.model.state_dict())
     metrics = {
         'train_loss': average_loss,
         'num-examples': len(train_set[1])
     }
     content = RecordDict({
-        'arrays': client_array_record,
+        'arrays': ArrayRecord(client_parameters),
         'metrics': MetricRecord(metrics)
     })
     return Message(content, reply_to=msg)
@@ -417,10 +426,10 @@ def client_evaluate(client: Client, msg: Message) -> Message:
     client.update_model(new_parameters)
     dataframe_path = MAIN_PATH / 'datasets' / 'UAVIDS-2025 Preprocessed.csv'
     client.set_dataframe(dataframe_path)
-    flow_ids: list[int] = msg.content['config']['flows']
+    flow_ids: list[int] = cast(list[int], msg.content['config']['flows'])
     test_set = client.get_flow_data(flow_ids)
 
-    metrics = client.evaluate(test_set)
+    metrics = cast(dict[str, MetricRecordValues], client.evaluate(test_set))
     metrics['num-examples'] = len(test_set[1])
     metric_record = MetricRecord(metrics)
     content = RecordDict({'metrics': metric_record})
