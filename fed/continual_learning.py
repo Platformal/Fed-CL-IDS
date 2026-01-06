@@ -166,11 +166,11 @@ class ExperienceReplay:
         """Add to replay buffer. All tensors need to be on CPU"""
         # Prefer exact n_samples than random per sampling
         features, labels = original_dataset
-        n_dataset_samples = len(labels)
-        if n_samples := int(n_dataset_samples * sample_rate):
-            selected = torch.randint(0, n_dataset_samples, size=(n_samples,))
+        n_new_samples = len(labels)
+        if n_samples := int(n_new_samples * sample_rate):
+            selected = torch.randint(0, n_new_samples, size=(n_samples,))
         else:
-            selected = torch.rand(size=(n_dataset_samples,)) <= sample_rate
+            selected = torch.rand(size=(n_new_samples,)) <= sample_rate
         selected_features = features[selected].cpu().detach()
         selected_labels = labels[selected].cpu().detach()
         self._buffer.append(selected_features, selected_labels)

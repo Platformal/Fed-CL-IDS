@@ -181,26 +181,22 @@ class Client:
         )
 
         # Total_loss is mutated in _train_iteration()
-        total_loss: Tensor = torch.tensor(
-            0.0,
-            dtype=torch.float32,
-            device=self.config.device
-        )
+        total_loss = self._zero_tensor()
         total_samples: int = 0
         loop_start = time()
         for _ in range(self.config.epochs):
-            n_samples = self._train_iteration(
+            loss, n_samples = self._train_iteration(
                 model=training_model,
                 optimizer=optimizer,
                 scheduler=scheduler,
-                data_loader=data_loader,
-                total_loss=total_loss
+                data_loader=data_loader
             )
             total_samples += n_samples
+            total_loss += loss
         print(f"Training Loop: {time() - loop_start} sec")
 
-        if self.config.dp_enabled:
-            self.model = training_model.to_standard_module()
+        if isinstance(training_model, GradSampleModule):
+            self.model = cast(MLP, training_model.to_standard_module())
             if self.stored_epsilon is not None:
                 raise TypeError("Epsilon needs to be None from evaluation.")
             self.stored_epsilon = self.dp.get_epsilon(self.config.delta)
@@ -226,9 +222,9 @@ class Client:
             optimizer: Adam | DPOptimizer,
             scheduler: CosineAnnealingLR,
             data_loader: DataLoader,
-            total_loss: Tensor
-    ) -> int:
+    ) -> tuple[Tensor, int]:
         n_samples: int = 0
+        iteration_loss = self._zero_tensor()
         for batch_features, batch_labels in data_loader:
             if not batch_labels.nelement():
                 continue
@@ -254,9 +250,9 @@ class Client:
             scheduler.step() # Adjusts learning rate
 
             batch_size = len(batch_labels)
-            total_loss.add_(loss.detach() * batch_size)
+            iteration_loss += loss.detach() * batch_size
             n_samples += batch_size
-        return n_samples
+        return iteration_loss, n_samples
 
     def evaluate(self, test_set: tuple[Tensor, Tensor]) -> dict[str, float]:
         """
@@ -278,16 +274,8 @@ class Client:
         predictions_list: list[Tensor] = []
         probabilities_list: list[Tensor] = []
         labels_list: list[Tensor] =  []
-        n_correct = torch.tensor(
-            0.0,
-            dtype=torch.float32,
-            device=self.config.device
-        )
-        total_loss = torch.tensor(
-            0.0,
-            dtype=torch.float32,
-            device=self.config.device
-        )
+        n_correct = self._zero_tensor()
+        total_loss = self._zero_tensor()
         total_samples = 0
 
         with torch.no_grad():
@@ -303,17 +291,17 @@ class Client:
                 predictions: Tensor = (probabilities >= 0.5).float()
 
                 n_batch_correct: Tensor = (predictions == batch_labels).sum()
-                n_correct.add_(n_batch_correct)
+                n_correct += n_batch_correct
                 batch_loss: Tensor = self.criterion(outputs, batch_labels)
-                total_loss.add_(batch_loss * len(batch_labels))
+                total_loss += batch_loss * len(batch_labels)
                 total_samples += len(batch_labels)
 
                 predictions_list.append(predictions)
                 probabilities_list.append(probabilities)
                 labels_list.append(batch_labels)
 
-        if self.config.dp_enabled:
-            self.model = evaluation_model.to_standard_module()
+        if isinstance(evaluation_model, GradSampleModule):
+            self.model = cast(MLP, evaluation_model.to_standard_module())
 
         all_predictions = torch.cat(predictions_list).cpu()
         all_probabilities = torch.cat(probabilities_list).cpu()
@@ -356,6 +344,10 @@ class Client:
             dp_model.eval()
         return dp_model, dp_optimizer, dp_data_loader
 
+    def _zero_tensor(self) -> Tensor:
+        """Mainly used to avoid .item() sync overhead for tensors"""
+        return torch.tensor(0.0, dtype=torch.float32, device=self.config.device)
+
 def _assign_client(function: Callable) -> Callable:
     """
     Initialize and cache client to context to maintain persistence.
@@ -388,7 +380,8 @@ def client_train(client: Client, msg: Message) -> Message:
     :rtype: Message
     """
     profile_on = 'profile_on' in msg.content['config']
-    server_parameters = msg.content['arrays'].to_torch_state_dict()
+    server_arrays = cast(ArrayRecord, msg.content['arrays'])
+    server_parameters = server_arrays.to_torch_state_dict()
     client.update_model(server_parameters)
     dataframe_path = MAIN_PATH / 'datasets' / 'UAVIDS-2025 Preprocessed.csv'
     client.set_dataframe(dataframe_path)
@@ -422,8 +415,9 @@ def client_evaluate(client: Client, msg: Message) -> Message:
     and trained model parameters.
     :rtype: Message
     """
-    new_parameters = msg.content['arrays'].to_torch_state_dict()
-    client.update_model(new_parameters)
+    server_arrays = cast(ArrayRecord, msg.content['arrays'])
+    server_parameters = server_arrays.to_torch_state_dict()
+    client.update_model(server_parameters)
     dataframe_path = MAIN_PATH / 'datasets' / 'UAVIDS-2025 Preprocessed.csv'
     client.set_dataframe(dataframe_path)
     flow_ids: list[int] = cast(list[int], msg.content['config']['flows'])
