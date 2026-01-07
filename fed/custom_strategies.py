@@ -19,15 +19,17 @@ import torch
 class FedCLIDSAvg(FedAvg):
     def __init__(
             self,
+            grid: Grid,
             fraction_train: float,
             fraction_eval: float,
             num_rounds: int
     ) -> None:
         super().__init__(fraction_train, fraction_eval)
+        self.grid = grid
+        self.num_rounds = num_rounds
         self.train_node_ids: list[int] = []
         self.evaluate_node_ids: list[int] = []
         self.all_node_ids: list[int] = []
-        self.num_rounds = num_rounds
         device_str = 'cuda' if torch.cuda.is_available() else 'cpu'
         self.device = torch.device(device_str)
 
@@ -126,9 +128,9 @@ class FedCLIDSAvg(FedAvg):
 
     def start(
         self,
-        grid: Grid,
         initial_arrays: ArrayRecord,
         current_day: int,
+        previous_roc: Optional[float],
         timeout: float = 3600,
         train_config: Optional[ConfigRecord] = None,
         evaluate_config: Optional[ConfigRecord] = None,
@@ -192,7 +194,10 @@ class FedCLIDSAvg(FedAvg):
         current_array = initial_arrays
         for current_round in range(1, self.num_rounds + 1):
             log(INFO, "")
-            log(INFO, "[DAY %s | ROUND %s/%s]", current_day, current_round, self.num_rounds)
+            log(
+                INFO, "[DAY %s | ROUND %s/%s]",
+                current_day, current_round, self.num_rounds
+            )
 
             # -----------------------------------------------------------------
             # --- TRAINING (CLIENTAPP-SIDE) -----------------------------------
@@ -200,12 +205,12 @@ class FedCLIDSAvg(FedAvg):
 
             # Call strategy to configure training round
             # Send messages and wait for replies
-            train_replies = grid.send_and_receive(
+            train_replies = self.grid.send_and_receive(
                 messages=self.configure_train(
                     current_round,
                     current_array,
                     train_config,
-                    grid,
+                    self.grid,
                 ),
                 timeout=timeout
             )
@@ -230,12 +235,12 @@ class FedCLIDSAvg(FedAvg):
 
             # Call strategy to configure evaluation round
             # Send messages and wait for replies
-            evaluate_replies: Iterable[Message] = grid.send_and_receive(
+            evaluate_replies: Iterable[Message] = self.grid.send_and_receive(
                 messages=self.configure_evaluate(
                     current_round,
                     current_array,
                     evaluate_config,
-                    grid,
+                    self.grid,
                 ),
                 timeout=timeout,
             )
@@ -353,11 +358,7 @@ def aggregate_metricrecords(
         weight_factors=epsilon_weight_factors,
         ignored_keys=(weighting_metric_name,)
     )
-    # If all values are -1 (differential privacy disabled)
-    if 'epsilon' in aggregated_epsilon:
-        aggregated_metrics['epsilon'] = aggregated_epsilon['epsilon']
-    else:
-        aggregated_metrics['epsilon'] = -1
+    aggregated_metrics['epsilon'] = aggregated_epsilon.get('epsilon', -1)
     return aggregated_metrics
 
 def _aggregation(

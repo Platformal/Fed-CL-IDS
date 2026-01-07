@@ -48,6 +48,7 @@ class Server:
     def __init__(self, grid: Grid, context: Context) -> None:
         self.config = ServerConfiguration(grid, context)
         self.federated_model = FedCLIDSAvg(
+            grid=grid,
             fraction_train=self.config.fraction_train,
             fraction_eval=self.config.fraction_evaluate,
             num_rounds=self.config.n_rounds
@@ -67,14 +68,15 @@ class Server:
             lr_max=cast(float, context.run_config['mlp-lr-max']),
             lr_min=cast(float, context.run_config['mlp-lr-min'])
         )
-        return OrderedDict(model.state_dict())
+        return cast(OrderedDict, model.state_dict())
 
     def split_data(
             self,
             raw_flows: list[int],
             train_ratio: float = 0.8,
             random_seed: Optional[int] = None,
-            csv_path: Optional[Path] = None) -> list[list[int]]:
+            csv_path: Optional[Path] = None
+    ) -> list[list[int]]:
         """
         Splits a list of flow IDs into two datasets.
         Can optionally be stratified by passing in csv filepath.
@@ -109,6 +111,62 @@ class Server:
         )
         return splits
 
+    def aggregate_records(self, metrics: list[dict[str, float]]) -> dict[str, float]:
+        n_recent = self.config.n_recent_metrics
+        eval_metrics = {
+            key: round(sum(record[key] for record in metrics) / n_recent, 6)
+            for key in metrics[0].keys()
+        }
+        return eval_metrics
+
+    def log_results( 
+            self,
+            result: Result,
+            agg_metrics: dict[str, float],
+            day: int
+    ) -> None:
+        """Saves aggregated model as pt file and logs aggregated metrics"""
+        # Saves most recent aggregated data from the rounds not average per day
+        torch.save(self.current_parameters, OUTPUT_PATH / f'day{day}.pt')
+
+        all_rounds = list(result.evaluate_metrics_clientapp.values())
+        all_rounds = cast(list[dict[str, float]], all_rounds)
+        sum_epsilon_day = 0.0
+        if self.config.dp_enabled:
+            sum_epsilon_day = sum(map(lambda record: record['epsilon'], all_rounds))
+            self.total_epsilon += sum_epsilon_day
+
+        dp_enabled = self.config.dp_enabled
+        round_epsilon_day = round(sum_epsilon_day, 6)
+        round_total_epsilon = round(self.total_epsilon, 6)
+        text = [
+            f"Day {day}",
+            f"{self.config.n_train_clients}/{self.config.total_clients} train",
+            f"Rounds: {self.config.n_rounds}",
+            f"Day Epsilon: {round_epsilon_day if dp_enabled else None}",
+            f"Total Epsilon: {round_total_epsilon if dp_enabled else None}",
+            f"{agg_metrics}\n"
+        ]
+        with (OUTPUT_PATH / 'metrics.txt').open('a', encoding='utf-8') as file:
+            file.write(' | '.join(text))
+
+    def get_uavids(self, filepath: Path) -> dict[str, list[int]]:
+        """
+        Opens form yaml file, and filters days from configuration file.
+        
+        :param server:
+        :type server: Server
+        :param filepath: Path to yaml file containing flows IDs
+        :type filepath: Path
+        :return: Contains day as a str and all the flow IDs
+        :rtype: dict[str, list[int]]
+        """
+        with filepath.open(encoding='utf-8') as file:
+            raw_days: dict[str, list[int]] = yaml.safe_load(file)
+        # Assuming dict is sorted/ordered by days
+        filtered_days = list(raw_days.items())[:self.config.n_days]
+        return dict(filtered_days)
+
     @staticmethod
     def distribute_flows(flows: Iterable[int], n_clients: int) -> list[list[int]]:
         """
@@ -124,8 +182,8 @@ class Server:
         clients = [[] for _ in range(n_clients)]
         for flow_id in flows:
             id_bytes = str(flow_id).encode()
-            id_hex = hashlib.sha256(id_bytes).hexdigest()
-            i = int(id_hex, 16) % n_clients
+            id_hash = hashlib.sha256(id_bytes).hexdigest()
+            i = int(id_hash, 16) % n_clients
             clients[i].append(flow_id)
         return clients
 
@@ -140,8 +198,9 @@ def main(grid: Grid, context: Context) -> None:
         RUNTIME_PATH.mkdir(exist_ok=True)
 
     server = Server(grid, context)
-    uavids_days = get_uavids(server, UAVIDS_DAYS_PATH)
+    uavids_days = server.get_uavids(UAVIDS_DAYS_PATH)
     daily_metric_logs: list[list[MetricRecord]] = []
+    previous_roc: Optional[float] = None
 
     start = time.time()
     for day, raw_flows in enumerate(uavids_days.values(), 1):
@@ -158,14 +217,20 @@ def main(grid: Grid, context: Context) -> None:
             (server.config.n_train_clients, server.config.n_evaluate_clients)
         )
         result = server.federated_model.start(
-            grid=grid,
             initial_arrays=ArrayRecord(server.current_parameters),
+            current_day=day,
+            previous_roc=previous_roc,
             train_config=ConfigRecord({'flows': json.dumps(train_flows)}),
-            evaluate_config=ConfigRecord({'flows': json.dumps(evaluate_flows)}),
-            current_day=day
+            evaluate_config=ConfigRecord({'flows': json.dumps(evaluate_flows)})
         )
         server.current_parameters = result.arrays.to_torch_state_dict()
-        log_results(server, result, day, daily_metric_logs)
+        all_rounds = list(result.evaluate_metrics_clientapp.values())
+        daily_metric_logs.append(all_rounds)
+        all_rounds = cast(list[dict[str, float]], all_rounds) # MetricRecord
+        recent_metrics = all_rounds[-server.config.n_recent_metrics:]
+        agg_metrics = server.aggregate_records(recent_metrics)
+        previous_roc = agg_metrics['roc-auc']
+        server.log_results(result, agg_metrics, day)
     print(f"Final Time: {time.time() - start}")
 
     FedMetrics.create_metric_plots(daily_metric_logs, OUTPUT_PATH)
@@ -182,59 +247,3 @@ def clear_directory(filepath: Path) -> None:
     """
     for file in filter(Path.is_file, filepath.iterdir()):
         file.unlink()
-
-def get_uavids(server: Server, filepath: Path) -> dict[str, list[int]]:
-    """
-    Opens form yaml file, and filters days from configuration file.
-    
-    :param server:
-    :type server: Server
-    :param filepath: Path to yaml file containing flows IDs
-    :type filepath: Path
-    :return: Contains day as a str and all the flow IDs
-    :rtype: dict[str, list[int]]
-    """
-    with filepath.open(encoding='utf-8') as file:
-        raw_days: dict[str, list[int]] = yaml.safe_load(file)
-    # Assuming dict is sorted/ordered by days
-    filtered_days = list(raw_days.items())[:server.config.n_days]
-    return dict(filtered_days)
-
-def log_results(
-        server: Server,
-        result: Result,
-        day: int,
-        daily_metrics: list[list[MetricRecord]]
-) -> None:
-    """Saves aggregated model as pt file and logs aggregated metrics"""
-    # Saves most recent aggregated data from the rounds not average per day
-    torch.save(server.current_parameters, OUTPUT_PATH / f'day{day}.pt')
-
-    all_rounds = list(result.evaluate_metrics_clientapp.values())
-    daily_metrics.append(all_rounds)
-    all_rounds = cast(list[dict[str, float]], all_rounds) # MetricRecord
-
-    sum_epsilon_day = 0.0
-    if server.config.dp_enabled:
-        sum_epsilon_day = sum(map(lambda round: round['epsilon'], all_rounds))
-        server.total_epsilon += sum_epsilon_day
-
-    n_recent = server.config.n_recent_metrics
-    recent_metrics = all_rounds[-n_recent:]
-    eval_metrics = {
-        key: round(sum(record[key] for record in recent_metrics) / n_recent, 6)
-        for key in recent_metrics[0].keys()
-    }
-
-    round_epsilon_day = round(sum_epsilon_day, 6)
-    round_total_epsilon = round(server.total_epsilon, 6)
-    text = [
-        f"Day {day}",
-        f"{server.config.n_train_clients}/{server.config.total_clients} train",
-        f"Rounds: {server.config.n_rounds}",
-        f"Day Epsilon: {round_epsilon_day if server.config.dp_enabled else None}",
-        f"Total Epsilon: {round_total_epsilon if server.config.dp_enabled else None}",
-        f"{eval_metrics}\n"
-    ]
-    with (OUTPUT_PATH / 'metrics.txt').open('a', encoding='utf-8') as file:
-        file.write(' | '.join(text))
