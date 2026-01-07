@@ -38,6 +38,7 @@ class ServerConfiguration:
         self.n_evaluate_clients = int(self.total_clients * self.fraction_evaluate)
 
         self.n_days = cast(int, context.run_config['max-days'])
+        self.n_recent_metrics = cast(int, context.run_config['n-recent-rounds'])
         self.n_rounds = cast(int, context.run_config['n-rounds'])
         self.dp_enabled = cast(bool, context.run_config['dp-enabled'])
 
@@ -163,6 +164,7 @@ def main(grid: Grid, context: Context) -> None:
             evaluate_config=ConfigRecord({'flows': json.dumps(evaluate_flows)}),
             current_day=day
         )
+        server.current_parameters = result.arrays.to_torch_state_dict()
         log_results(server, result, day, daily_metric_logs)
     print(f"Final Time: {time.time() - start}")
 
@@ -206,28 +208,33 @@ def log_results(
 ) -> None:
     """Saves aggregated model as pt file and logs aggregated metrics"""
     # Saves most recent aggregated data from the rounds not average per day
-    server.current_parameters = result.arrays.to_torch_state_dict()
     torch.save(server.current_parameters, OUTPUT_PATH / f'day{day}.pt')
 
-    # Saves dict pairs for each round
-    rounds_eval_metrics = list(result.evaluate_metrics_clientapp.values())
-    daily_metrics.append(rounds_eval_metrics)
+    all_rounds = list(result.evaluate_metrics_clientapp.values())
+    daily_metrics.append(all_rounds)
+    all_rounds = cast(list[dict[str, float]], all_rounds) # MetricRecord
 
     sum_epsilon_day = 0.0
     if server.config.dp_enabled:
-        sum_epsilon_day = sum(
-            cast(float, round_metric['epsilon'])
-            for round_metric in result.evaluate_metrics_clientapp.values()
-        )
+        sum_epsilon_day = sum(map(lambda round: round['epsilon'], all_rounds))
         server.total_epsilon += sum_epsilon_day
 
-    n_rounds, eval_metrics = result.evaluate_metrics_clientapp.popitem()
+    n_recent = server.config.n_recent_metrics
+    recent_metrics = all_rounds[-n_recent:]
+    eval_metrics = {
+        key: round(sum(record[key] for record in recent_metrics) / n_recent, 6)
+        for key in recent_metrics[0].keys()
+    }
+
+    round_epsilon_day = round(sum_epsilon_day, 6)
+    round_total_epsilon = round(server.total_epsilon, 6)
+    text = [
+        f"Day {day}",
+        f"{server.config.n_train_clients}/{server.config.total_clients} train",
+        f"Rounds: {server.config.n_rounds}",
+        f"Day Epsilon: {round_epsilon_day if server.config.dp_enabled else None}",
+        f"Total Epsilon: {round_total_epsilon if server.config.dp_enabled else None}",
+        f"{eval_metrics}\n"
+    ]
     with (OUTPUT_PATH / 'metrics.txt').open('a', encoding='utf-8') as file:
-        file.write(
-            f"Day {day}"
-            f" | {server.config.n_train_clients}/{server.config.total_clients} train"
-            f" | Rounds: {n_rounds}"
-            f" | Day Epsilon: {sum_epsilon_day if server.config.dp_enabled else None}"
-            f" | Total Epsilon: {server.total_epsilon if server.config.dp_enabled else None}"
-            f" | {str(eval_metrics)}\n"
-        )
+        file.write(' | '.join(text))

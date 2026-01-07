@@ -312,3 +312,9 @@ Day 2 | 5/10 train | Rounds: 60 | Day Epsilon: 34.63778103845147 | Total Epsilon
 Day 3 | 5/10 train | Rounds: 60 | Day Epsilon: 28.212447630012466 | Total Epsilon: 141.2779111631521 | {'accuracy': 0.9294318063366253, 'loss': 0.3773714406084604, 'roc-auc': 0.9850336753197679, 'pr-auc': 0.9893174949240171, 'macro-f1': 0.9290122849775186, 'recall@fpr=1%': 0.9133040735025351, 'epsilon': 0.47020746050020734}
 Day 4 | 5/10 train | Rounds: 60 | Day Epsilon: 23.84231745169854 | Total Epsilon: 165.12022861485065 | {'accuracy': 0.9007794728155165, 'loss': 0.4851547411252781, 'roc-auc': 0.9846703198127431, 'pr-auc': 0.9916231727327404, 'macro-f1': 0.8996464787257084, 'recall@fpr=1%': 0.8607008963881465, 'epsilon': 0.39737195752830357}
 
+Recent Aggregation (10 Rounds) & Rounding Values:
+Day 1 | 5/10 train | Rounds: 60 | Day Epsilon: 78.422756 | Total Epsilon: 78.422756 | {'accuracy': 0.953369, 'loss': 0.298812, 'roc-auc': 0.970777, 'pr-auc': 0.931878, 'macro-f1': 0.895414, 'recall@fpr=1%': 0.768157, 'epsilon': 0.80626}
+Day 2 | 5/10 train | Rounds: 60 | Day Epsilon: 34.574384 | Total Epsilon: 112.99714 | {'accuracy': 0.932288, 'loss': 0.363583, 'roc-auc': 0.987832, 'pr-auc': 0.986912, 'macro-f1': 0.927372, 'recall@fpr=1%': 0.861887, 'epsilon': 0.539921}
+Day 3 | 5/10 train | Rounds: 60 | Day Epsilon: 28.311727 | Total Epsilon: 141.308867 | {'accuracy': 0.927493, 'loss': 0.383658, 'roc-auc': 0.989102, 'pr-auc': 0.991928, 'macro-f1': 0.927097, 'recall@fpr=1%': 0.885765, 'epsilon': 0.471862}
+Day 4 | 5/10 train | Rounds: 60 | Day Epsilon: 23.880357 | Total Epsilon: 165.189224 | {'accuracy': 0.896852, 'loss': 0.492, 'roc-auc': 0.986297, 'pr-auc': 0.991982, 'macro-f1': 0.895609, 'recall@fpr=1%': 0.86532, 'epsilon': 0.398006}
+

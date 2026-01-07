@@ -322,10 +322,10 @@ def aggregate_metricrecords(
         next(iter(record.metric_records.values()))
         for record in records
     ]
-    weights: list[float] = [
+    weights: list[int] = [
         # Because replies have been checked for consistency,
         # we can safely cast the weighting factor to float
-        cast(float, metric_dict[weighting_metric_name])
+        cast(int, metric_dict[weighting_metric_name])
         for metric_dict in metric_records
     ]
     total_weight = sum(weights)
@@ -353,7 +353,11 @@ def aggregate_metricrecords(
         weight_factors=epsilon_weight_factors,
         ignored_keys=(weighting_metric_name,)
     )
-    aggregated_metrics['epsilon'] = aggregated_epsilon['epsilon']
+    # If all values are -1 (differential privacy disabled)
+    if 'epsilon' in aggregated_epsilon:
+        aggregated_metrics['epsilon'] = aggregated_epsilon['epsilon']
+    else:
+        aggregated_metrics['epsilon'] = -1
     return aggregated_metrics
 
 def _aggregation(

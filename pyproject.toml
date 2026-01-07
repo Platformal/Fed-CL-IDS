@@ -40,6 +40,7 @@ fraction-train = 0.5
 fraction-evaluate = 1.0
 max-days = 4
 epochs = 2
+n-recent-rounds = 10
 n-rounds = 60
 batch-size = 128
 
