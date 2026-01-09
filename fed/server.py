@@ -207,7 +207,7 @@ def main(grid: Grid, context: Context) -> None:
         clean_rounds = cast(list[dict[str, float]], clean_rounds) # MetricRecord
         recent_metrics = clean_rounds[-server.config.n_recent_metrics:]
         aggregated_rounds = server.aggregate_records(recent_metrics)
-        previous_roc = aggregated_rounds['roc-auc']
+        previous_roc = aggregated_rounds['auroc']
         server.log_results(day, clean_rounds, aggregated_rounds, recovery_metric)
     print(f"Final Time: {time.time() - start}")
 

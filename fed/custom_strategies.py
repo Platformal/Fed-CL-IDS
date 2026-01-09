@@ -311,7 +311,7 @@ class FedCLIDSAvg(FedAvg):
                 )
                 evaluate_metrics = result.evaluate_metrics_clientapp
                 evaluate_metrics[current_round] = agg_evaluate_metrics
-                agg_roc_auc = cast(float, agg_evaluate_metrics['roc-auc'])
+                agg_roc_auc = cast(float, agg_evaluate_metrics['auroc'])
                 recovery_metric = result.evaluate_metrics_clientapp[-1]
                 if (recovery_metric['recovery-round'] == -1
                     and previous_roc is not None

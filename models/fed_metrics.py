@@ -14,11 +14,11 @@ class FedMetrics:
         return float(f1_score(labels, predictions, average='macro'))
 
     @staticmethod
-    def roc_auc(labels: Tensor, probabilities: Tensor) -> float:
+    def auroc(labels: Tensor, probabilities: Tensor) -> float:
         return float(roc_auc_score(labels, probabilities))
 
     @staticmethod
-    def pr_auc(labels: Tensor, probabilities: Tensor) -> float:
+    def auprc(labels: Tensor, probabilities: Tensor) -> float:
         precision, recall, _ = precision_recall_curve(labels, probabilities)
         return float(auc(recall, precision))
 
@@ -38,8 +38,8 @@ class FedMetrics:
         n_rounds = len(daily_metrics[0])
         x = list(range(1, n_rounds + 1))
         for day, rounds in enumerate(daily_metrics, 1):
-            roc_auc = [metrics['roc-auc'] for metrics in rounds]
-            plt.plot(x, roc_auc, label=f'Day {day}')
+            auroc = [metrics['auroc'] for metrics in rounds]
+            plt.plot(x, auroc, label=f'Day {day}')
         plt.title(
             "Area Under Receiver Operating Characteristic Curve\n"
             "by Days per Round"
@@ -47,4 +47,4 @@ class FedMetrics:
         plt.xlabel('Rounds')
         plt.ylabel('AUROC Curve')
         plt.legend(loc='lower right')
-        plt.savefig(save_directory / 'daily_roc_auc.png', dpi=200)
+        plt.savefig(save_directory / 'daily_auroc.png', dpi=200)

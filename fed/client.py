@@ -248,7 +248,6 @@ class Client:
         labels_list: list[Tensor] =  []
         predictions_list: list[Tensor] = []
         probabilities_list: list[Tensor] = []
-
         n_correct = self._zero_tensor()
         total_loss = self._zero_tensor()
         total_samples = 0
@@ -276,23 +275,36 @@ class Client:
         if isinstance(evaluation_model, GradSampleModule):
             self.model = cast(MLP, evaluation_model.to_standard_module())
 
-        predictions = torch.cat(predictions_list).cpu()
-        probabilities = torch.cat(probabilities_list).cpu()
-        labels = torch.cat(labels_list).cpu()
-        training_epsilon = -1 # Default sentinel value
-        if self.stored_epsilon is not None:
-            training_epsilon = self.stored_epsilon
-            self.stored_epsilon = None
         metrics = {
             'accuracy': (n_correct / total_samples).item(),
             'loss': (total_loss / total_samples).item(),
-            'roc-auc': FedMetrics.roc_auc(labels, probabilities),
-            'pr-auc': FedMetrics.pr_auc(labels, probabilities),
+        }
+        fed_metrics = self._create_metrics(
+            labels=torch.cat(labels_list).cpu(),
+            predictions=torch.cat(predictions_list).cpu(),
+            probabilities=torch.cat(probabilities_list).cpu()
+        )
+        metrics.update(fed_metrics)
+        return metrics, total_samples
+
+    def _create_metrics(
+            self,
+            labels: Tensor,
+            predictions: Tensor,
+            probabilities: Tensor
+    ) -> dict[str, float]:
+        """Generates general metrics and resets the epsilon it has value."""
+        training_epsilon = -1 # Default sentinel value
+        if self.stored_epsilon is not None:
+            training_epsilon, self.stored_epsilon = self.stored_epsilon, None
+        fed_cl_ids_metrics = {
+            'auroc': FedMetrics.auroc(labels, probabilities),
+            'auprc': FedMetrics.auprc(labels, probabilities),
             'macro-f1': FedMetrics.macro_f1(labels, predictions),
             'recall@fpr=1%': FedMetrics.recall_at_fpr(labels, probabilities, 0.01),
             'epsilon': training_epsilon
         }
-        return metrics, total_samples
+        return fed_cl_ids_metrics
 
     def _create_model_packages(
             self,
