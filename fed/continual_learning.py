@@ -2,6 +2,7 @@
 and elastic weight consolidation."""
 from dataclasses import dataclass
 from pathlib import Path
+from typing import cast
 
 from opacus.grad_sample.grad_sample_module import GradSampleModule
 from torch.utils.data import DataLoader, TensorDataset
@@ -60,13 +61,8 @@ class ElasticWeightConsolidation:
             batch_size: int
     ) -> None:
         """
-        Calculates the fisher diagonal from the current model
-        and training data. Does not modify the model
-        
-        :param train_set: Same features and labels used in training the model.
-        :type train_set: tuple[Tensor, Tensor]
-        :return: Calculated fisher diagonal from modified/trained parameters.
-        :rtype: dict[str, Tensor]
+        Calculates the fisher diagonal from the current model and training data.
+        Does not modify the model
         """
         model.eval()
         if not isinstance(model, MLP):
@@ -77,15 +73,8 @@ class ElasticWeightConsolidation:
             for name, parameter in model.named_parameters()
             if parameter.requires_grad
         }
-
-        data_loader = DataLoader(
-            dataset=TensorDataset(*train_set),
-            batch_size=batch_size
-        )
-
-        for batch_features, batch_labels in data_loader:
-            batch_features: Tensor
-            batch_labels: Tensor
+        for batch in DataLoader(TensorDataset(*train_set), batch_size):
+            batch_features, batch_labels = cast(tuple[Tensor, Tensor], batch)
 
             model.zero_grad()
             outputs: Tensor = model(batch_features)

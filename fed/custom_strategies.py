@@ -53,8 +53,7 @@ class FedCLIDSAvg(FedAvg):
                 sample_size=sample_size
             )
         log(
-            INFO,
-            "configure_train: Sampled %s nodes (out of %s)",
+            INFO, "configure_train: Sampled %s nodes (out of %s)",
             len(self.train_node_ids), len(self.all_node_ids)
         )
         config['server-round'] = server_round
@@ -63,17 +62,103 @@ class FedCLIDSAvg(FedAvg):
             self.arrayrecord_key: arrays,
             self.configrecord_key: config
         })
-        messages = self._construct_messages(record, self.train_node_ids, MessageType.TRAIN)
-        # Assign flows to messages
-        flows: list[list[int]] = json.loads(config['flows'])
-        for i, message in enumerate(messages):
-            client_content = message.content.copy()
-            client_content['config'] = client_content['config'].copy()
-            client_content['config']['flows'] = flows[i]
-            message.content = client_content
+        messages = self._construct_messages(
+            record=record,
+            node_ids=self.train_node_ids,
+            message_type=MessageType.TRAIN
+        )
         messages = cast(list[Message], messages)
         messages[0].content['config']['profile_on'] = 1
         return messages
+
+    def configure_evaluate(
+            self, server_round: int,
+            arrays: ArrayRecord,
+            config: ConfigRecord,
+            grid: Grid
+    ) -> Iterable[Message]:
+        """Configure the next round of federated evaluation"""
+        if self.fraction_evaluate == 0.0:
+            return []
+
+        if not self.evaluate_node_ids:
+            num_nodes = int(len(list(grid.get_node_ids())) * self.fraction_evaluate)
+            sample_size = max(num_nodes, self.min_evaluate_nodes)
+            node_ids, _ = sample_nodes(grid, self.min_available_nodes, sample_size)
+            self.evaluate_node_ids = node_ids
+        log(
+            INFO, "configure_evaluate: Sampled %s nodes (out of %s)",
+            len(self.evaluate_node_ids), len(self.all_node_ids)
+        )
+
+        # Always inject current server round
+        config['server-round'] = server_round
+
+        # Construct messages
+        record = RecordDict({
+            self.arrayrecord_key: arrays,
+            self.configrecord_key: config
+        })
+        messages = self._construct_messages(
+            record=record,
+            node_ids=self.evaluate_node_ids,
+            message_type=MessageType.EVALUATE
+        )
+        return messages
+
+    def _construct_messages(
+            self,
+            record: RecordDict,
+            node_ids: list[int],
+            message_type: str
+    ) -> list[Message]:
+        """Construct N Messages carrying the same RecordDict payload."""
+        messages = []
+        flows = cast(
+            list[list[int]],
+            json.loads(cast(bytes, record[self.configrecord_key]['flows']))
+        )
+        for node_id, flow_list in zip(node_ids, flows):
+            record_copy = record.copy()
+            config_copy = cast(ConfigRecord, record[self.configrecord_key].copy())
+            config_copy['flows'] = flow_list
+            record_copy[self.configrecord_key] = config_copy
+            messages.append(Message(record_copy, node_id, message_type))
+        return messages
+
+    def aggregate_train(
+        self,
+        server_round: int,
+        replies: Iterable[Message],
+    ) -> tuple[Optional[ArrayRecord], Optional[MetricRecord]]:
+        """Aggregate ArrayRecords and MetricRecords in the received Messages."""
+        valid_replies, _ = self._check_and_log_replies(replies, is_train=True)
+        if not valid_replies:
+            return None, None
+
+        reply_contents = [msg.content for msg in valid_replies]
+        arrays: list[dict[str, Tensor]] = [
+            content[self.arrayrecord_key].to_torch_state_dict()
+            for content in reply_contents
+        ]
+
+        aggregated_model: OrderedDict[str, Tensor] = OrderedDict()
+        # This iterates over all keys and averages them
+        with torch.no_grad():
+            # Parameter key examples: 'network.9.weight', 'network.9.bias', ...
+            # Tensors already on cpu #sus 🤨
+            for key in arrays[0].keys():
+                tensors_of_key = torch.stack([array[key] for array in arrays])
+                averaged_tensor = torch.mean(tensors_of_key, dim=0).cpu()
+                aggregated_model[key] = averaged_tensor
+        array_record = ArrayRecord(aggregated_model)
+
+        # Aggregate MetricRecords
+        metrics = self.train_metrics_aggr_fn(
+            reply_contents,
+            self.weighted_by_key,
+        )
+        return array_record, metrics
 
     def aggregate_evaluate(
             self,
@@ -87,44 +172,8 @@ class FedCLIDSAvg(FedAvg):
         if valid_replies:
             reply_contents = [msg.content for msg in valid_replies]
             # Aggregate MetricRecords
-            # metrics = self.average_evaluate_metrics(reply_contents, self.weighted_by_key)
             metrics = aggregate_metricrecords(reply_contents, self.weighted_by_key)
         return metrics
-
-    def configure_evaluate(
-        self, server_round: int, arrays: ArrayRecord, config: ConfigRecord, grid: Grid
-    ) -> Iterable[Message]:
-        """Configure the next round of federated evaluation"""
-        if self.fraction_evaluate == 0.0:
-            return []
-
-        if not self.evaluate_node_ids:
-            num_nodes = int(len(list(grid.get_node_ids())) * self.fraction_evaluate)
-            sample_size = max(num_nodes, self.min_evaluate_nodes)
-            node_ids, _ = sample_nodes(grid, self.min_available_nodes, sample_size)
-            self.evaluate_node_ids = node_ids
-        log(
-            INFO,
-            "configure_evaluate: Sampled %s nodes (out of %s)",
-            len(self.evaluate_node_ids), len(self.all_node_ids)
-        )
-
-        # Always inject current server round
-        config['server-round'] = server_round
-
-        # Construct messages
-        record = RecordDict({
-            self.arrayrecord_key: arrays,
-            self.configrecord_key: config
-        })
-        messages = self._construct_messages(record, self.evaluate_node_ids, MessageType.EVALUATE)
-        flows: list[list[int]] = json.loads(config['flows'])
-        for i, message in enumerate(messages):
-            client_content = message.content.copy()
-            client_content['config'] = client_content['config'].copy()
-            client_content['config']['flows'] = flows[i]
-            message.content = client_content
-        return messages
 
     def start(
         self,
@@ -182,6 +231,10 @@ class FedCLIDSAvg(FedAvg):
         train_config = ConfigRecord() if train_config is None else train_config
         evaluate_config = ConfigRecord() if evaluate_config is None else evaluate_config
         result = Result()
+        result.evaluate_metrics_clientapp[-1] = MetricRecord({
+            'recovery-seconds': -1.0,
+            'recovery-round': -1
+        })
 
         t_start = time.time()
         # Evaluate starting global parameters
@@ -252,8 +305,19 @@ class FedCLIDSAvg(FedAvg):
             )
             # Log training metrics and append to history
             if agg_evaluate_metrics is not None:
-                log(INFO, "\t└──> Aggregated MetricRecord: %s", agg_evaluate_metrics)
-                result.evaluate_metrics_clientapp[current_round] = agg_evaluate_metrics
+                log(
+                    INFO, "\t└──> Aggregated MetricRecord: %s",
+                    agg_evaluate_metrics
+                )
+                evaluate_metrics = result.evaluate_metrics_clientapp
+                evaluate_metrics[current_round] = agg_evaluate_metrics
+                agg_roc_auc = cast(float, agg_evaluate_metrics['roc-auc'])
+                recovery_metric = result.evaluate_metrics_clientapp[-1]
+                if (recovery_metric['recovery-round'] == -1
+                    and previous_roc is not None
+                    and agg_roc_auc >= 0.95 * previous_roc):
+                    recovery_metric['recovery-seconds'] = time.time() - t_start
+                    recovery_metric['recovery-round'] = current_round
 
         # -----------------------------------------------------------------
         # --- EVALUATION (SERVERAPP-SIDE) ---------------------------------
@@ -278,40 +342,6 @@ class FedCLIDSAvg(FedAvg):
 
         return result
 
-    def aggregate_train(
-        self,
-        server_round: int,
-        replies: Iterable[Message],
-    ) -> tuple[Optional[ArrayRecord], Optional[MetricRecord]]:
-        """Aggregate ArrayRecords and MetricRecords in the received Messages."""
-        valid_replies, _ = self._check_and_log_replies(replies, is_train=True)
-        if not valid_replies:
-            return None, None
-
-        reply_contents = [msg.content for msg in valid_replies]
-        arrays: list[dict[str, Tensor]] = [
-            content[self.arrayrecord_key].to_torch_state_dict()
-            for content in reply_contents
-        ]
-
-        aggregated_model: OrderedDict[str, Tensor] = OrderedDict()
-        # This iterates over all keys, averaging them,
-        # and appending to the aggregated model
-        with torch.no_grad():
-            # Parameter key examples: 'network.9.weight', 'network.9.bias', ...
-            # Tensors already on cpu #sus 🤨
-            for key in arrays[0].keys():
-                tensors_of_key = torch.stack([array[key] for array in arrays])
-                averaged_tensor = torch.mean(tensors_of_key, dim=0).cpu()
-                aggregated_model[key] = averaged_tensor
-        array_record = ArrayRecord(aggregated_model)
-
-        # Aggregate MetricRecords
-        metrics = self.train_metrics_aggr_fn(
-            reply_contents,
-            self.weighted_by_key,
-        )
-        return array_record, metrics
 
 def aggregate_metricrecords(
     records: list[RecordDict],
@@ -397,18 +427,15 @@ def log_strategy_start_info(
     """
     log(INFO, "\t├── Number of rounds: %d", num_rounds)
     log(
-        INFO,
-        "\t├── ArrayRecord (%.2f MB)",
+        INFO, "\t├── ArrayRecord (%.2f MB)",
         sum(len(array.data) for array in arrays.values()) / (1024**2),
     )
     log(
-        INFO,
-        "\t├── ConfigRecord (train): %s",
+        INFO, "\t├── ConfigRecord (train): %s",
         str_config(train_config) if train_config else "(empty!)",
     )
     log(
-        INFO,
-        "\t├── ConfigRecord (evaluate): %s",
+        INFO, "\t├── ConfigRecord (evaluate): %s",
         str_config(evaluate_config) if evaluate_config else "(empty!)",
     )
 
@@ -416,8 +443,8 @@ def str_config(config: ConfigRecord) -> str:
     """Ensures start log does not print all elements in flows"""
     all_config_str: list[str] = []
     for key, value in config.items():
-        # Poorly written I know...
-        value = json.loads(value)
+        if key == 'flows':
+            value = json.loads(cast(bytes, value))
         if isinstance(value, bytes):
             string = f"'{key}': '<bytes>'"
         elif isinstance(value, list):

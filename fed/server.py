@@ -26,6 +26,7 @@ UAVIDS_DAYS_PATH = MAIN_PATH / 'data_pipeline' / 'splits' / 'uavids_days.yaml'
 UAVIDS_DATA_PATH = MAIN_PATH / 'datasets' / 'UAVIDS-2025 Preprocessed.csv'
 RUNTIME_PATH = MAIN_PATH / 'runtime'
 OUTPUT_PATH = MAIN_PATH / 'outputs'
+METRICS_PATH = OUTPUT_PATH / 'metrics.txt'
 
 @dataclass()
 class ServerConfiguration:
@@ -80,18 +81,6 @@ class Server:
         """
         Splits a list of flow IDs into two datasets.
         Can optionally be stratified by passing in csv filepath.
-        
-        :param raw_flows: Integers for a given day to split into two datasets.
-        :type raw_flows: list[int]
-        :param train_ratio: Value between 0 and 1 to split training and testing set by.
-        :type train_ratio: float
-        :param random_seed: Integer for reproducibility.
-        :type random_seed: Optional[int]
-        :param csv_path: Location of csv file to allow label stratification. 
-        Stratifies by the 'label' column.
-        :type csv_path: Optional[Path]
-        :return: Two lists (from train_test_split) of integers.
-        :rtype: list[list[int]]
         """
         labels: Optional[pd.Series] = None
         if csv_path:
@@ -119,18 +108,17 @@ class Server:
         }
         return eval_metrics
 
-    def log_results( 
+    def log_results(
             self,
-            result: Result,
+            day: int,
+            all_rounds: list[dict[str, float]],
             agg_metrics: dict[str, float],
-            day: int
+            recovery_metric: dict[str, float]
     ) -> None:
         """Saves aggregated model as pt file and logs aggregated metrics"""
         # Saves most recent aggregated data from the rounds not average per day
         torch.save(self.current_parameters, OUTPUT_PATH / f'day{day}.pt')
 
-        all_rounds = list(result.evaluate_metrics_clientapp.values())
-        all_rounds = cast(list[dict[str, float]], all_rounds)
         sum_epsilon_day = 0.0
         if self.config.dp_enabled:
             sum_epsilon_day = sum(map(lambda record: record['epsilon'], all_rounds))
@@ -143,24 +131,17 @@ class Server:
             f"Day {day}",
             f"{self.config.n_train_clients}/{self.config.total_clients} train",
             f"Rounds: {self.config.n_rounds}",
-            f"Day Epsilon: {round_epsilon_day if dp_enabled else None}",
+            f"Day Epsilon: {round_epsilon_day if dp_enabled else None}, "
             f"Total Epsilon: {round_total_epsilon if dp_enabled else None}",
+            f"Recovery Time (sec): {round(recovery_metric['recovery-seconds'], 3)}, "
+            f"Recovery Rounds: {recovery_metric['recovery-round']}",
             f"{agg_metrics}\n"
         ]
-        with (OUTPUT_PATH / 'metrics.txt').open('a', encoding='utf-8') as file:
+        with (METRICS_PATH).open('a', encoding='utf-8') as file:
             file.write(' | '.join(text))
 
     def get_uavids(self, filepath: Path) -> dict[str, list[int]]:
-        """
-        Opens form yaml file, and filters days from configuration file.
-        
-        :param server:
-        :type server: Server
-        :param filepath: Path to yaml file containing flows IDs
-        :type filepath: Path
-        :return: Contains day as a str and all the flow IDs
-        :rtype: dict[str, list[int]]
-        """
+        """Opens form yaml file, and filters days from configuration file."""
         with filepath.open(encoding='utf-8') as file:
             raw_days: dict[str, list[int]] = yaml.safe_load(file)
         # Assuming dict is sorted/ordered by days
@@ -169,16 +150,7 @@ class Server:
 
     @staticmethod
     def distribute_flows(flows: Iterable[int], n_clients: int) -> list[list[int]]:
-        """
-        Hash each flow by ID and assign to a bucket for each client.
-        
-        :param flows: Integers representing a flow ID.
-        :type flows: list[int]
-        :param n_clients: Number of clients to create buckets.
-        :type n_clients: int
-        :return: List of integers for each client to process.
-        :rtype: list[list[int], ...]
-        """
+        """Hash each flow by ID and assign to a bucket for each client."""
         clients = [[] for _ in range(n_clients)]
         for flow_id in flows:
             id_bytes = str(flow_id).encode()
@@ -224,26 +196,27 @@ def main(grid: Grid, context: Context) -> None:
             evaluate_config=ConfigRecord({'flows': json.dumps(evaluate_flows)})
         )
         server.current_parameters = result.arrays.to_torch_state_dict()
-        all_rounds = list(result.evaluate_metrics_clientapp.values())
-        daily_metric_logs.append(all_rounds)
-        all_rounds = cast(list[dict[str, float]], all_rounds) # MetricRecord
-        recent_metrics = all_rounds[-server.config.n_recent_metrics:]
-        agg_metrics = server.aggregate_records(recent_metrics)
-        previous_roc = agg_metrics['roc-auc']
-        server.log_results(result, agg_metrics, day)
+
+        # Have all_rounds values (MetricRecords)
+        # Have logging function get epsilon, aggregate, and pop recovery
+        all_rounds = result.evaluate_metrics_clientapp
+        recovery_metric = cast(dict[str, float], all_rounds.pop(-1))
+        clean_rounds = list(all_rounds.values())
+
+        daily_metric_logs.append(clean_rounds)
+        clean_rounds = cast(list[dict[str, float]], clean_rounds) # MetricRecord
+        recent_metrics = clean_rounds[-server.config.n_recent_metrics:]
+        aggregated_rounds = server.aggregate_records(recent_metrics)
+        previous_roc = aggregated_rounds['roc-auc']
+        server.log_results(day, clean_rounds, aggregated_rounds, recovery_metric)
     print(f"Final Time: {time.time() - start}")
 
     FedMetrics.create_metric_plots(daily_metric_logs, OUTPUT_PATH)
-    with (OUTPUT_PATH / 'metrics.txt').open('a', encoding='utf-8') as file:
+    with (METRICS_PATH).open('a', encoding='utf-8') as file:
         file.write('\n')
     clear_directory(RUNTIME_PATH)
 
 def clear_directory(filepath: Path) -> None:
-    """
-    Removes all files in a folder directory
-
-    :param path: Path to the folder
-    :type path: Path
-    """
+    """Removes all files in a folder directory"""
     for file in filter(Path.is_file, filepath.iterdir()):
         file.unlink()
