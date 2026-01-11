@@ -13,11 +13,10 @@ import torch
 import yaml
 
 from flwr.app import ArrayRecord, ConfigRecord, Context, MetricRecord
-from flwr.serverapp.strategy import Result
 from flwr.serverapp import Grid, ServerApp
 
 from sklearn.model_selection import train_test_split
-from fed.custom_strategies import FedCLIDSAvg
+from fed.fedclids_strategies import FedCLIDSAvg
 from models.fed_metrics import FedMetrics
 from models.mlp import MLP
 
@@ -50,9 +49,9 @@ class Server:
         self.config = ServerConfiguration(grid, context)
         self.federated_model = FedCLIDSAvg(
             grid=grid,
+            num_rounds=self.config.n_rounds,
             fraction_train=self.config.fraction_train,
-            fraction_eval=self.config.fraction_evaluate,
-            num_rounds=self.config.n_rounds
+            fraction_eval=self.config.fraction_evaluate
         )
         self.current_parameters = self._initial_parameters(context)
         self.total_epsilon = 0.0
@@ -101,7 +100,8 @@ class Server:
         return splits
 
     def aggregate_records(self, metrics: list[dict[str, float]]) -> dict[str, float]:
-        n_recent = self.config.n_recent_metrics
+        "Standard arithmetic averaging of given MetricRecords"
+        n_recent = len(metrics)
         eval_metrics = {
             key: round(sum(record[key] for record in metrics) / n_recent, 6)
             for key in metrics[0].keys()
@@ -139,6 +139,8 @@ class Server:
         ]
         with (METRICS_PATH).open('a', encoding='utf-8') as file:
             file.write(' | '.join(text))
+            if day == self.config.n_days:
+                file.write('\n')
 
     def get_uavids(self, filepath: Path) -> dict[str, list[int]]:
         """Opens form yaml file, and filters days from configuration file."""
@@ -197,23 +199,19 @@ def main(grid: Grid, context: Context) -> None:
         )
         server.current_parameters = result.arrays.to_torch_state_dict()
 
-        # Have all_rounds values (MetricRecords)
-        # Have logging function get epsilon, aggregate, and pop recovery
         all_rounds = result.evaluate_metrics_clientapp
         recovery_metric = cast(dict[str, float], all_rounds.pop(-1))
-        clean_rounds = list(all_rounds.values())
+        clean_metrics = list(all_rounds.values())
 
-        daily_metric_logs.append(clean_rounds)
-        clean_rounds = cast(list[dict[str, float]], clean_rounds) # MetricRecord
-        recent_metrics = clean_rounds[-server.config.n_recent_metrics:]
-        aggregated_rounds = server.aggregate_records(recent_metrics)
-        previous_roc = aggregated_rounds['auroc']
-        server.log_results(day, clean_rounds, aggregated_rounds, recovery_metric)
+        daily_metric_logs.append(clean_metrics)
+        clean_metrics = cast(list[dict[str, float]], clean_metrics) # MetricRecord
+        recent_metrics = clean_metrics[-server.config.n_recent_metrics:]
+        agg_metrics = server.aggregate_records(recent_metrics)
+        previous_roc = agg_metrics['auroc']
+        server.log_results(day, clean_metrics, agg_metrics, recovery_metric)
     print(f"Final Time: {time.time() - start}")
 
     FedMetrics.create_metric_plots(daily_metric_logs, OUTPUT_PATH)
-    with (METRICS_PATH).open('a', encoding='utf-8') as file:
-        file.write('\n')
     clear_directory(RUNTIME_PATH)
 
 def clear_directory(filepath: Path) -> None:

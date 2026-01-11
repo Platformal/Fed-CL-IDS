@@ -20,9 +20,9 @@ class FedCLIDSAvg(FedAvg):
     def __init__(
             self,
             grid: Grid,
+            num_rounds: int,
             fraction_train: float,
             fraction_eval: float,
-            num_rounds: int
     ) -> None:
         super().__init__(fraction_train, fraction_eval)
         self.grid = grid
@@ -143,7 +143,7 @@ class FedCLIDSAvg(FedAvg):
         ]
 
         aggregated_model: OrderedDict[str, Tensor] = OrderedDict()
-        # This iterates over all keys and averages them
+        # This iterates over all keys and averages a param's tensor
         with torch.no_grad():
             # Parameter key examples: 'network.9.weight', 'network.9.bias', ...
             # Tensors already on cpu #sus 🤨
@@ -184,7 +184,8 @@ class FedCLIDSAvg(FedAvg):
         train_config: Optional[ConfigRecord] = None,
         evaluate_config: Optional[ConfigRecord] = None,
         evaluate_fn: Optional[
-            Callable[[int, ArrayRecord], Optional[MetricRecord]]] = None
+            Callable[[int, ArrayRecord], Optional[MetricRecord]]
+        ] = None
     ) -> Result:
         """Execute the federated learning strategy.
 
@@ -222,7 +223,10 @@ class FedCLIDSAvg(FedAvg):
         """
         log(INFO, "Starting %s strategy:", self.__class__.__name__)
         log_strategy_start_info(
-            self.num_rounds, initial_arrays, train_config, evaluate_config
+            num_rounds=self.num_rounds,
+            arrays=initial_arrays,
+            train_config=train_config,
+            evaluate_config=evaluate_config
         )
         self.summary()
         log(INFO, "")
@@ -231,6 +235,11 @@ class FedCLIDSAvg(FedAvg):
         train_config = ConfigRecord() if train_config is None else train_config
         evaluate_config = ConfigRecord() if evaluate_config is None else evaluate_config
         result = Result()
+
+        # Variables for recovery time to 95%
+        window_len = 10
+        left_pointer = 1 # Points at day 1
+        total_auroc = 0.0
         result.evaluate_metrics_clientapp[-1] = MetricRecord({
             'recovery-seconds': -1.0,
             'recovery-round': -1
@@ -309,15 +318,26 @@ class FedCLIDSAvg(FedAvg):
                     INFO, "\t└──> Aggregated MetricRecord: %s",
                     agg_evaluate_metrics
                 )
-                evaluate_metrics = result.evaluate_metrics_clientapp
-                evaluate_metrics[current_round] = agg_evaluate_metrics
-                agg_roc_auc = cast(float, agg_evaluate_metrics['auroc'])
-                recovery_metric = result.evaluate_metrics_clientapp[-1]
-                if (recovery_metric['recovery-round'] == -1
-                    and previous_roc is not None
-                    and agg_roc_auc >= 0.95 * previous_roc):
-                    recovery_metric['recovery-seconds'] = time.time() - t_start
-                    recovery_metric['recovery-round'] = current_round
+                eval_metrics = result.evaluate_metrics_clientapp
+                eval_metrics[current_round] = agg_evaluate_metrics
+                # If recovery time still needs to be found
+                # current_round acts as the right pointer of the window,
+                # left pointer will shrink (and remove itself)
+                # if current window size > window_len
+                if eval_metrics[-1]['recovery-round'] == -1 and current_day > 1:
+                    total_auroc += cast(float, agg_evaluate_metrics['auroc'])
+                    if current_round > window_len:
+                        left_metric = eval_metrics[left_pointer]
+                        total_auroc -= cast(float, left_metric['auroc'])
+                        left_pointer += 1
+                    # Update recovery if auroc has reached 95% of previous day's auroc
+                    current_auroc = total_auroc / window_len
+                    auroc_threshold = 0.95 * cast(float, previous_roc)
+                    if (current_round >= window_len
+                        and current_auroc >= auroc_threshold):
+                        recovery_time = time.time() - t_start
+                        eval_metrics[-1]['recovery-seconds'] = recovery_time
+                        eval_metrics[-1]['recovery-round'] = current_round
 
         # -----------------------------------------------------------------
         # --- EVALUATION (SERVERAPP-SIDE) ---------------------------------
@@ -339,7 +359,6 @@ class FedCLIDSAvg(FedAvg):
         for line in io.StringIO(str(result)):
             log(INFO, "\t%s", line.strip("\n"))
         log(INFO, "")
-
         return result
 
 
@@ -357,6 +376,7 @@ def aggregate_metricrecords(
         next(iter(record.metric_records.values()))
         for record in records
     ]
+    metric_records = cast(list[dict[str, float]], metric_records)
     weights: list[int] = [
         # Because replies have been checked for consistency,
         # we can safely cast the weighting factor to float
@@ -373,21 +393,24 @@ def aggregate_metricrecords(
 
     # Writes the epsilon value since the other function would aggregate
     # the sentinel value (-1)
-    epsilon_metrics = list(filter(
-        lambda metric_dict: cast(float, metric_dict['epsilon']) >= 0,
-        metric_records
-    ))
-    epsilon_weights: list[float] = [
-        cast(float, metric_dict[weighting_metric_name])
+    epsilon_metrics = [
+        metric_dict
+        for metric_dict in metric_records
+        if metric_dict['epsilon'] >= 0
+    ]
+    epsilon_weights = [
+        metric_dict[weighting_metric_name]
         for metric_dict in epsilon_metrics
     ]
     total_epsilon_weight = sum(epsilon_weights)
     epsilon_weight_factors = [w / total_epsilon_weight for w in epsilon_weights]
+    # Empty if differential privacy is disabled
     aggregated_epsilon = _aggregation(
         metric_records=epsilon_metrics,
         weight_factors=epsilon_weight_factors,
         ignored_keys=(weighting_metric_name,)
     )
+    
     aggregated_metrics['epsilon'] = aggregated_epsilon.get('epsilon', -1)
     return aggregated_metrics
 
@@ -396,13 +419,14 @@ def _aggregation(
         weight_factors: Iterable[float],
         ignored_keys: Container[str]
 ) -> MetricRecord:
+    """Aggregates MetricRecords in respect to given weights"""
     aggregated_metrics = MetricRecord()
     for metric_dict, weight in zip(metric_records, weight_factors):
         for key, value in metric_dict.items():
             if key in ignored_keys:
                 continue
-            value_type = list[float] if isinstance(value, list) else float
-            aggregated_value = aggregated_metrics.get(key, value_type())
+            default_type = list[float] if isinstance(value, list) else float
+            aggregated_value = aggregated_metrics.get(key, default_type())
             if isinstance(value, list):
                 aggregated_value = cast(list[float], aggregated_value)
                 aggregated_value = aggregated_value or [0.0] * len(value)
