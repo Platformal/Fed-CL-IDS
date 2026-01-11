@@ -216,6 +216,8 @@ class Client:
             outputs = outputs.squeeze(1)
             loss: Tensor = self.criterion(outputs, batch_labels)
 
+            # As the model changes from its gradients,
+            # calculate penalties as it changes parameters
             if self.config.cl_enabled and not self.cl.ewc.is_empty():
                 batch_fisher_penalty = self.cl.ewc.calculate_penalty(
                     model=model,

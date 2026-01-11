@@ -40,9 +40,11 @@ fraction-train = 0.5
 fraction-evaluate = 1.0
 max-days = 4
 epochs = 2
-n-recent-rounds = 10
 n-rounds = 60
 batch-size = 128
+# How many recent metrics to aggregate after each day
+# Also used for how many to aggregate and compare for recovery time (FedAvg)
+n-aggregations = 10
 
 mlp-widths = "256,256,128,64"
 mlp-dropout = 0.2

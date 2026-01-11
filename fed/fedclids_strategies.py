@@ -11,6 +11,7 @@ from flwr.common import (
 )
 from flwr.serverapp.strategy.strategy_utils import sample_nodes
 from flwr.serverapp.strategy import FedAvg, Result
+from flwr.app import Context
 from flwr.server import Grid
 
 from torch import Tensor
@@ -20,12 +21,15 @@ class FedCLIDSAvg(FedAvg):
     def __init__(
             self,
             grid: Grid,
+            context: Context,
             num_rounds: int,
             fraction_train: float,
             fraction_eval: float,
     ) -> None:
         super().__init__(fraction_train, fraction_eval)
         self.grid = grid
+        self.context = context
+        self.window_len = cast(int, context.run_config['n-aggregations'])
         self.num_rounds = num_rounds
         self.train_node_ids: list[int] = []
         self.evaluate_node_ids: list[int] = []
@@ -237,7 +241,6 @@ class FedCLIDSAvg(FedAvg):
         result = Result()
 
         # Variables for recovery time to 95%
-        window_len = 10
         left_pointer = 1 # Points at day 1
         total_auroc = 0.0
         result.evaluate_metrics_clientapp[-1] = MetricRecord({
@@ -326,14 +329,14 @@ class FedCLIDSAvg(FedAvg):
                 # if current window size > window_len
                 if eval_metrics[-1]['recovery-round'] == -1 and current_day > 1:
                     total_auroc += cast(float, agg_evaluate_metrics['auroc'])
-                    if current_round > window_len:
+                    if current_round > self.window_len:
                         left_metric = eval_metrics[left_pointer]
                         total_auroc -= cast(float, left_metric['auroc'])
                         left_pointer += 1
                     # Update recovery if auroc has reached 95% of previous day's auroc
-                    current_auroc = total_auroc / window_len
+                    current_auroc = total_auroc / self.window_len
                     auroc_threshold = 0.95 * cast(float, previous_roc)
-                    if (current_round >= window_len
+                    if (current_round >= self.window_len
                         and current_auroc >= auroc_threshold):
                         recovery_time = time.time() - t_start
                         eval_metrics[-1]['recovery-seconds'] = recovery_time
@@ -410,7 +413,7 @@ def aggregate_metricrecords(
         weight_factors=epsilon_weight_factors,
         ignored_keys=(weighting_metric_name,)
     )
-    
+
     aggregated_metrics['epsilon'] = aggregated_epsilon.get('epsilon', -1)
     return aggregated_metrics
 

@@ -38,7 +38,7 @@ class ServerConfiguration:
         self.n_evaluate_clients = int(self.total_clients * self.fraction_evaluate)
 
         self.n_days = cast(int, context.run_config['max-days'])
-        self.n_recent_metrics = cast(int, context.run_config['n-recent-rounds'])
+        self.n_aggregate = cast(int, context.run_config['n-aggregations'])
         self.n_rounds = cast(int, context.run_config['n-rounds'])
         self.dp_enabled = cast(bool, context.run_config['dp-enabled'])
 
@@ -49,6 +49,7 @@ class Server:
         self.config = ServerConfiguration(grid, context)
         self.federated_model = FedCLIDSAvg(
             grid=grid,
+            context=context,
             num_rounds=self.config.n_rounds,
             fraction_train=self.config.fraction_train,
             fraction_eval=self.config.fraction_evaluate
@@ -205,7 +206,7 @@ def main(grid: Grid, context: Context) -> None:
 
         daily_metric_logs.append(clean_metrics)
         clean_metrics = cast(list[dict[str, float]], clean_metrics) # MetricRecord
-        recent_metrics = clean_metrics[-server.config.n_recent_metrics:]
+        recent_metrics = clean_metrics[-server.config.n_aggregate:]
         agg_metrics = server.aggregate_records(recent_metrics)
         previous_roc = agg_metrics['auroc']
         server.log_results(day, clean_metrics, agg_metrics, recovery_metric)
