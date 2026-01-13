@@ -28,6 +28,9 @@ from models.mlp import MLP, Adam, CosineAnnealingLR
 from models.fed_metrics import FedMetrics
 
 MAIN_PATH = Path().cwd()
+DATAFRAME_PATH = MAIN_PATH / 'datasets' / 'UAVIDS-2025 Preprocessed.csv'
+RUNTIME_PATH = MAIN_PATH / 'runtime'
+TRACE_PATH = RUNTIME_PATH / 'trace.txt'
 
 @dataclass()
 class ClientConfiguration:
@@ -59,7 +62,7 @@ class Client:
 
         self.cl = ContinualLearning(
             er_filepath_identifier=os.getpid(), # or Node ID
-            er_runtime_directory=MAIN_PATH / 'runtime',
+            er_runtime_directory=RUNTIME_PATH,
             device=self.config.device
         )
         self.dp = DifferentialPrivacy()
@@ -129,7 +132,7 @@ class Client:
             activities = [ProfilerActivity.CPU, ProfilerActivity.CUDA]
             with profile(activities=activities, profile_memory=True) as prof:
                 result = self._train(train_set)
-            (MAIN_PATH / 'runtime' / 'trace.txt').write_text(
+            TRACE_PATH.write_text(
                 prof.key_averages().table(sort_by='cpu_time_total')
             )
         else:
@@ -298,7 +301,8 @@ class Client:
         """Generates general metrics and resets the epsilon it has value."""
         training_epsilon = -1 # Default sentinel value
         if self.stored_epsilon is not None:
-            training_epsilon, self.stored_epsilon = self.stored_epsilon, None
+            training_epsilon = self.stored_epsilon
+            self.stored_epsilon = None
         fed_cl_ids_metrics = {
             'auroc': FedMetrics.auroc(labels, probabilities),
             'auprc': FedMetrics.auprc(labels, probabilities),
@@ -332,7 +336,10 @@ class Client:
         return dp_model, dp_optimizer, dp_data_loader
 
     def _zero_tensor(self) -> Tensor:
-        """Mainly used to avoid .item() sync overhead for tensors"""
+        """
+        Mainly used to avoid .item() sync overhead for tensors since
+        you can queue tensor operations for GPU to do.
+        """
         return torch.tensor(0.0, dtype=torch.float32, device=self.config.device)
 
 
@@ -356,8 +363,7 @@ def client_train(client: Client, msg: Message) -> Message:
     server_arrays = cast(ArrayRecord, msg.content['arrays'])
     server_parameters = server_arrays.to_torch_state_dict()
     client.update_model(server_parameters)
-    dataframe_path = MAIN_PATH / 'datasets' / 'UAVIDS-2025 Preprocessed.csv'
-    client.set_dataframe(dataframe_path)
+    client.set_dataframe(DATAFRAME_PATH)
     flow_ids = cast(list[int], msg.content['config']['flows'])
     train_set = client.get_flow_data(flow_ids)
     average_loss, n_samples = client.train(train_set, profile_on)
@@ -383,16 +389,14 @@ def client_evaluate(client: Client, msg: Message) -> Message:
     server_arrays = cast(ArrayRecord, msg.content['arrays'])
     server_parameters = server_arrays.to_torch_state_dict()
     client.update_model(server_parameters)
-    dataframe_path = MAIN_PATH / 'datasets' / 'UAVIDS-2025 Preprocessed.csv'
-    client.set_dataframe(dataframe_path)
+    client.set_dataframe(DATAFRAME_PATH)
     flow_ids: list[int] = cast(list[int], msg.content['config']['flows'])
     test_set = client.get_flow_data(flow_ids)
 
-    metrics, n_samples = cast(
+    eval_metrics, n_samples = cast(
         tuple[dict[str, MetricRecordValues], int],
         client.evaluate(test_set)
     )
-    metrics['num-examples'] = n_samples
-    metric_record = MetricRecord(metrics)
-    content = RecordDict({'metrics': metric_record})
+    eval_metrics['num-examples'] = n_samples
+    content = RecordDict({'metrics': MetricRecord(eval_metrics)})
     return Message(content, reply_to=msg)

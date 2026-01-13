@@ -42,11 +42,11 @@ class ElasticWeightConsolidation:
         # Penalty = (λ/2) * Σ F_i(θ_i - θ*_i)²
         sum_loss = torch.tensor(0.0, device=self.device)
         for name, parameter in model.named_parameters():
-            # Private model prepends _module. to each param name
+            # GradSampleModule prepends _module. to each param name
             name = name.removeprefix('_module.')
             if name not in self._prev_parameters:
                 print("Parameter not in prev_parameters")
-                continue # Never triggered (since ewc.is_empty())
+                continue
             f_i = self._fisher_diagonal[name]
             theta_star = self._prev_parameters[name]
             penalty_i = f_i * (parameter - theta_star).pow(2)
@@ -120,10 +120,7 @@ class ExperienceReplay:
             device: torch.device
     ) -> None:
         self.device = device
-        self._buffer = ReplayBuffer(
-            identifier=filepath_identifier,
-            path=runtime_directory
-        )
+        self._buffer = ReplayBuffer(filepath_identifier, runtime_directory)
 
     def sample_replay_buffer(
             self,
@@ -142,9 +139,9 @@ class ExperienceReplay:
         if not (actual_size := min(len(self._buffer), ideal_size)):
             return original_dataset
         # Ratio will be off until replay buffer size >= replay sample size
-        new_dataset = self._buffer.sample(actual_size)
-        deviced_dataset = tuple(map(lambda x: x.to(self.device), new_dataset))
-        features, labels = map(torch.cat, zip(original_dataset, deviced_dataset))
+        samples = self._buffer.sample(actual_size)
+        new_dataset = tuple(map(lambda x: x.to(self.device), samples))
+        features, labels = map(torch.cat, zip(original_dataset, new_dataset))
         return features, labels
 
     def add_data(
@@ -153,13 +150,15 @@ class ExperienceReplay:
             sample_rate: float
     ) -> None:
         """Add to replay buffer. All tensors need to be on CPU"""
-        # Prefer exact n_samples than random per sampling
         features, labels = original_dataset
         n_new_samples = len(labels)
+        # Prefer to get exact amount if n_samples * sample rate is big enough
         if n_samples := int(n_new_samples * sample_rate):
-            selected = torch.randint(0, n_new_samples, size=(n_samples,))
+            size = (n_samples,)
+            selected = torch.randint(0, n_new_samples, size)
         else:
-            selected = torch.rand(size=(n_new_samples,)) <= sample_rate
+            size = (n_new_samples,)
+            selected = torch.rand(size) <= sample_rate
         selected_features = features[selected].cpu().detach()
         selected_labels = labels[selected].cpu().detach()
         self._buffer.append(selected_features, selected_labels)
@@ -195,6 +194,7 @@ class ReplayBuffer:
         if not labels.nelement():
             return
 
+        # Initialize if neded
         if not hasattr(self._labels, 'memmap'):
             self._capacity = ReplayBuffer.INITIAL_CAPACITY
             self._features.n_inputs = features.shape[1]
@@ -225,9 +225,10 @@ class ReplayBuffer:
             size=length * data_obj.n_inputs,
             dtype=self.dtype
         )
+        # If it's the features, rehape array to 2D
         if data_obj.n_inputs > 1:
-            shape = (-1, data_obj.n_inputs)
-            new_memmap = new_memmap.reshape(shape)
+            new_shape = (-1, data_obj.n_inputs)
+            new_memmap = new_memmap.reshape(new_shape)
         return new_memmap
 
     def sample(self, n_samples: int) -> tuple[Tensor, Tensor]:
@@ -235,7 +236,6 @@ class ReplayBuffer:
             raise ValueError("Empty replay buffer.")
         if n_samples > self._length:
             raise ValueError("Sample size larger than replay buffer size.")
-
         indices = torch.randperm(self._length)[:n_samples]
         features = self._features.memmap[indices]
         labels = self._labels.memmap[indices]

@@ -138,7 +138,7 @@ class Server:
             f"Recovery Rounds: {recovery_metric['recovery-round']}",
             f"{agg_metrics}\n"
         ]
-        with (METRICS_PATH).open('a', encoding='utf-8') as file:
+        with METRICS_PATH.open('a', encoding='utf-8') as file:
             file.write(' | '.join(text))
             if day == self.config.n_days:
                 file.write('\n')
