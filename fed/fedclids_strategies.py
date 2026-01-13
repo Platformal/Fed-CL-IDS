@@ -36,6 +36,7 @@ class FedCLIDSAvg(FedAvg):
         self.all_node_ids: list[int] = []
         device_str = 'cuda' if torch.cuda.is_available() else 'cpu'
         self.device = torch.device(device_str)
+        self.timeout = 3600
 
     # Changed sample_nodes function only to initialize
     def configure_train(
@@ -155,14 +156,13 @@ class FedCLIDSAvg(FedAvg):
                 tensors_of_key = torch.stack([array[key] for array in arrays])
                 averaged_tensor = torch.mean(tensors_of_key, dim=0).cpu()
                 aggregated_model[key] = averaged_tensor
-        array_record = ArrayRecord(aggregated_model)
 
         # Aggregate MetricRecords
         metrics = self.train_metrics_aggr_fn(
             reply_contents,
             self.weighted_by_key,
         )
-        return array_record, metrics
+        return ArrayRecord(aggregated_model), metrics
 
     def aggregate_evaluate(
             self,
@@ -184,12 +184,8 @@ class FedCLIDSAvg(FedAvg):
         initial_arrays: ArrayRecord,
         current_day: int,
         previous_roc: Optional[float],
-        timeout: float = 3600,
-        train_config: Optional[ConfigRecord] = None,
-        evaluate_config: Optional[ConfigRecord] = None,
-        evaluate_fn: Optional[
-            Callable[[int, ArrayRecord], Optional[MetricRecord]]
-        ] = None
+        train_config: Optional[list[ConfigRecord]] = None,
+        evaluate_config: Optional[list[ConfigRecord]] = None
     ) -> Result:
         """Execute the federated learning strategy.
 
@@ -236,8 +232,8 @@ class FedCLIDSAvg(FedAvg):
         log(INFO, "")
 
         # Initialize if None
-        train_config = ConfigRecord() if train_config is None else train_config
-        evaluate_config = ConfigRecord() if evaluate_config is None else evaluate_config
+        train_config = train_config or []
+        evaluate_config = evaluate_config or []
         result = Result()
 
         # Variables for recovery time to 95%
@@ -249,13 +245,6 @@ class FedCLIDSAvg(FedAvg):
         })
 
         t_start = time.time()
-        # Evaluate starting global parameters
-        if evaluate_fn:
-            res = evaluate_fn(0, initial_arrays)
-            log(INFO, "Initial global evaluation results: %s", res)
-            if res is not None:
-                result.evaluate_metrics_serverapp[0] = res
-
         current_array = initial_arrays
         for current_round in range(1, self.num_rounds + 1):
             log(INFO, "")
@@ -277,7 +266,7 @@ class FedCLIDSAvg(FedAvg):
                     train_config,
                     self.grid,
                 ),
-                timeout=timeout
+                timeout=self.timeout
             )
 
             # Aggregate train
@@ -307,7 +296,7 @@ class FedCLIDSAvg(FedAvg):
                     evaluate_config,
                     self.grid,
                 ),
-                timeout=timeout,
+                timeout=self.timeout,
             )
 
             # Aggregate evaluate
@@ -323,17 +312,14 @@ class FedCLIDSAvg(FedAvg):
                 )
                 eval_metrics = result.evaluate_metrics_clientapp
                 eval_metrics[current_round] = agg_evaluate_metrics
-                # If recovery time still needs to be found
                 # current_round acts as the right pointer of the window,
                 # left pointer will shrink (and remove itself)
-                # if current window size > window_len
                 if eval_metrics[-1]['recovery-round'] == -1 and current_day > 1:
                     total_auroc += cast(float, agg_evaluate_metrics['auroc'])
                     if current_round > self.window_len:
                         left_metric = eval_metrics[left_pointer]
                         total_auroc -= cast(float, left_metric['auroc'])
                         left_pointer += 1
-                    # Update recovery if auroc has reached 95% of previous day's auroc
                     current_auroc = total_auroc / self.window_len
                     auroc_threshold = 0.95 * cast(float, previous_roc)
                     if (current_round >= self.window_len
@@ -345,14 +331,6 @@ class FedCLIDSAvg(FedAvg):
         # -----------------------------------------------------------------
         # --- EVALUATION (SERVERAPP-SIDE) ---------------------------------
         # -----------------------------------------------------------------
-
-        # Centralized evaluation
-        if evaluate_fn:
-            log(INFO, "Global evaluation")
-            res = evaluate_fn(current_round, current_array)
-            log(INFO, "\t└──> MetricRecord: %s", res)
-            if res is not None:
-                result.evaluate_metrics_serverapp[current_round] = res
 
         log(INFO, "")
         log(INFO, "Strategy execution finished in %.2fs", time.time() - t_start)
@@ -380,9 +358,7 @@ def aggregate_metricrecords(
         for record in records
     ]
     metric_records = cast(list[dict[str, float]], metric_records)
-    weights: list[int] = [
-        # Because replies have been checked for consistency,
-        # we can safely cast the weighting factor to float
+    weights = [
         cast(int, metric_dict[weighting_metric_name])
         for metric_dict in metric_records
     ]
@@ -445,8 +421,8 @@ def _aggregation(
 def log_strategy_start_info(
     num_rounds: int,
     arrays: ArrayRecord,
-    train_config: Optional[ConfigRecord],
-    evaluate_config: Optional[ConfigRecord],
+    train_config: Optional[list[ConfigRecord]],
+    evaluate_config: Optional[list[ConfigRecord]],
 ) -> None:
     """
     Log information about the strategy start. Modified to prevent
@@ -459,11 +435,11 @@ def log_strategy_start_info(
     )
     log(
         INFO, "\t├── ConfigRecord (train): %s",
-        str_config(train_config) if train_config else "(empty!)",
+        str_config(train_config[0]) if train_config else "(empty!)",
     )
     log(
         INFO, "\t├── ConfigRecord (evaluate): %s",
-        str_config(evaluate_config) if evaluate_config else "(empty!)",
+        str_config(evaluate_config[0]) if evaluate_config else "(empty!)",
     )
 
 def str_config(config: ConfigRecord) -> str:

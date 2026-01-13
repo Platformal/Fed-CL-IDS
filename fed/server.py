@@ -71,13 +71,13 @@ class Server:
         )
         return cast(OrderedDict, model.state_dict())
 
-    def split_data(
+    def _split_data(
             self,
             raw_flows: list[int],
             train_ratio: float = 0.8,
             random_seed: Optional[int] = None,
             csv_path: Optional[Path] = None
-    ) -> list[list[int]]:
+    ) -> tuple[list[int], list[int]]:
         """
         Splits a list of flow IDs into two datasets.
         Can optionally be stratified by passing in csv filepath.
@@ -98,7 +98,7 @@ class Server:
             random_state=random_seed,
             stratify=labels
         )
-        return splits
+        return tuple(splits)
 
     def aggregate_records(self, metrics: list[dict[str, float]]) -> dict[str, float]:
         "Standard arithmetic averaging of given MetricRecords"
@@ -151,8 +151,7 @@ class Server:
         filtered_days = list(raw_days.items())[:self.config.n_days]
         return dict(filtered_days)
 
-    @staticmethod
-    def distribute_flows(flows: Iterable[int], n_clients: int) -> list[list[int]]:
+    def _distribute_flows(self, flows: Iterable[int], n_clients: int) -> list[list[int]]:
         """Hash each flow by ID and assign to a bucket for each client."""
         clients = [[] for _ in range(n_clients)]
         for flow_id in flows:
@@ -161,6 +160,34 @@ class Server:
             i = int(id_hash, 16) % n_clients
             clients[i].append(flow_id)
         return clients
+
+    def get_data_flows(
+            self,
+            raw_flows: list[int]
+    ) -> tuple[list[ConfigRecord], list[ConfigRecord]]:
+        """Splits flows into train and evaluate and distributes them among
+        n_clients for each respective flow"""
+        # 80/20 split
+        train_eval_split = self._split_data(
+            raw_flows=raw_flows,
+            csv_path=UAVIDS_DATA_PATH
+        )
+        # Train flows (80%) gets hashed into 5 clients (fraction train = 0.5)
+        # Evaluate flows (20%) gets hashed into 10 clients (evaluate = 1.0)
+        train_tasks, eval_tasks = map(
+            self._distribute_flows,
+            (train_split, eval_split),
+            (self.config.n_train_clients, self.config.n_evaluate_clients)
+        )
+        train_records = [
+            ConfigRecord({'flows': client_flows})
+            for client_flows in train_tasks
+        ]
+        eval_records = [
+            ConfigRecord({'flows': client_flows})
+            for client_flows in eval_tasks
+        ]
+        return train_records, eval_records
 
 app = ServerApp()
 
@@ -179,24 +206,13 @@ def main(grid: Grid, context: Context) -> None:
 
     start = time.time()
     for day, raw_flows in enumerate(uavids_days.values(), 1):
-        # 80/20 split
-        train_split, evaluation_split = server.split_data(
-            raw_flows=raw_flows,
-            csv_path=UAVIDS_DATA_PATH
-        )
-        # Train flows (80%) gets hashed into 5 clients (fraction train = 0.5)
-        # Evaluate flows (20%) gets hashed into 10 clients (evaluate = 1.0)
-        train_flows, evaluate_flows = map(
-            Server.distribute_flows,
-            (train_split, evaluation_split),
-            (server.config.n_train_clients, server.config.n_evaluate_clients)
-        )
+        train_flows, evaluate_flows = server.get_data_flows(raw_flows)
         result = server.federated_model.start(
             initial_arrays=ArrayRecord(server.current_parameters),
             current_day=day,
             previous_roc=previous_roc,
-            train_config=ConfigRecord({'flows': json.dumps(train_flows)}),
-            evaluate_config=ConfigRecord({'flows': json.dumps(evaluate_flows)})
+            train_config=train_flows,
+            evaluate_config=evaluate_flows
         )
         server.current_parameters = result.arrays.to_torch_state_dict()
 
