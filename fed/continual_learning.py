@@ -149,7 +149,7 @@ class ExperienceReplay:
             original_dataset: tuple[Tensor, Tensor],
             sample_rate: float
     ) -> None:
-        """Add to replay buffer. All tensors need to be on CPU"""
+        """Add to replay buffer. Detaches and moves tensor to the CPU"""
         features, labels = original_dataset
         n_new_samples = len(labels)
         # Prefer to get exact amount if n_samples * sample rate is big enough

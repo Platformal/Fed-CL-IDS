@@ -101,7 +101,7 @@ class Client:
 
     def get_flow_data(self, flow_ids: list[int]) -> tuple[Tensor, Tensor]:
         """
-        Uses self.dataframe to transform table of features and label into
+        Transforms csv table of features and label into
         tensors on self.config.device.
 
         Assumes label column is called 'label'.
@@ -121,7 +121,7 @@ class Client:
         tensor_labels = torch.from_numpy(np_labels).to(self.config.device)
         return tensor_features, tensor_labels
 
-    def train(self, train_set: tuple[Tensor, Tensor], profile_on) -> tuple[float, int]:
+    def train(self, train_set: tuple[Tensor, Tensor], profile_on: bool) -> tuple[float, int]:
         """
         Trains local model modified by the toml configuration file 
         (such as continual learning and differential privacy), 

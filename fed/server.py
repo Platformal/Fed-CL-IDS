@@ -4,7 +4,6 @@ from collections import OrderedDict
 from dataclasses import dataclass
 from pathlib import Path
 import hashlib
-import json
 import time
 
 import pandas as pd
@@ -16,7 +15,7 @@ from flwr.app import ArrayRecord, ConfigRecord, Context, MetricRecord
 from flwr.serverapp import Grid, ServerApp
 
 from sklearn.model_selection import train_test_split
-from fed.fedclids_strategies import FedCLIDSAvg
+from fed.fed_cl_ids_strategies import FedCLIDSAvg
 from models.fed_metrics import FedMetrics
 from models.mlp import MLP
 

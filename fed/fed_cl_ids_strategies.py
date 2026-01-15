@@ -1,7 +1,6 @@
-from typing import Callable, Optional, Iterable, Container, cast
+from typing import Optional, Iterable, Container, cast
 from collections import OrderedDict
 from logging import INFO
-import json
 import time
 import io
 
@@ -29,7 +28,6 @@ class FedCLIDSAvg(FedAvg):
         super().__init__(fraction_train, fraction_eval)
         self.grid = grid
         self.context = context
-        self.window_len = cast(int, context.run_config['n-aggregations'])
         self.num_rounds = num_rounds
         self.train_node_ids: list[int] = []
         self.evaluate_node_ids: list[int] = []
@@ -41,98 +39,86 @@ class FedCLIDSAvg(FedAvg):
     # Changed sample_nodes function only to initialize
     def configure_train(
             self,
-            server_round: int,
             arrays: ArrayRecord,
-            config: ConfigRecord,
-    ) -> Iterable[Message]:
+            configs: list[ConfigRecord],
+    ) -> list[Message]:
         """Configure the next round of federated training"""
         if self.fraction_train == 0.0:
             return []
-        if not self.train_node_ids:
-            num_nodes = int(len(list(self.grid.get_node_ids())) * self.fraction_train)
-            sample_size = max(num_nodes, self.min_train_nodes)
-            self.train_node_ids, self.all_node_ids = sample_nodes(
-                grid=self.grid,
-                min_available_nodes=self.min_available_nodes,
-                sample_size=sample_size
-            )
         log(
             INFO, "configure_train: Sampled %s nodes (out of %s)",
             len(self.train_node_ids), len(self.all_node_ids)
         )
-        config['server-round'] = server_round
-
-        record = RecordDict({
-            self.arrayrecord_key: arrays,
-            self.configrecord_key: config
-        })
         messages = self._construct_messages(
-            record=record,
+            arrays=arrays,
             node_ids=self.train_node_ids,
-            message_type=MessageType.TRAIN
+            message_type=MessageType.TRAIN,
+            configs=configs
         )
-        messages = cast(list[Message], messages)
         messages[0].content['config']['profile_on'] = 1
         return messages
 
     def configure_evaluate(
-            self, server_round: int,
+            self,
             arrays: ArrayRecord,
-            config: ConfigRecord,
-    ) -> Iterable[Message]:
+            configs: list[ConfigRecord],
+    ) -> list[Message]:
         """Configure the next round of federated evaluation"""
         if self.fraction_evaluate == 0.0:
             return []
-
-        if not self.evaluate_node_ids:
-            num_nodes = int(len(list(self.grid.get_node_ids())) * self.fraction_evaluate)
-            sample_size = max(num_nodes, self.min_evaluate_nodes)
-            node_ids, _ = sample_nodes(self.grid, self.min_available_nodes, sample_size)
-            self.evaluate_node_ids = node_ids
         log(
             INFO, "configure_evaluate: Sampled %s nodes (out of %s)",
             len(self.evaluate_node_ids), len(self.all_node_ids)
         )
-
-        # Always inject current server round
-        config['server-round'] = server_round
-
-        # Construct messages
-        record = RecordDict({
-            self.arrayrecord_key: arrays,
-            self.configrecord_key: config
-        })
         messages = self._construct_messages(
-            record=record,
+            arrays=arrays,
             node_ids=self.evaluate_node_ids,
-            message_type=MessageType.EVALUATE
+            message_type=MessageType.EVALUATE,
+            configs=configs
         )
         return messages
+
+    def sample_nodes(self) -> None:
+        """Modifies node IDs of train, evaluate, and all node IDs"""
+        # Non-persistent train/eval nodes & n_all_nodes -> len(self.all_node_ids)
+        if self.all_node_ids:
+            return
+        n_all_nodes = len(list(self.grid.get_node_ids()))
+        if self.fraction_train:
+            n_train = int(self.fraction_train * n_all_nodes)
+            self.train_node_ids, self.all_node_ids = sample_nodes(
+                grid=self.grid,
+                min_available_nodes=self.min_available_nodes,
+                sample_size=max(n_train, self.min_train_nodes)
+            )
+        if self.fraction_evaluate:
+            n_evaluate = int(self.fraction_evaluate * n_all_nodes)
+            self.evaluate_node_ids, _ = sample_nodes(
+                grid=self.grid,
+                min_available_nodes=self.min_available_nodes,
+                sample_size=max(n_evaluate, self.min_available_nodes)
+            )
 
     def _construct_messages(
             self,
-            record: RecordDict,
+            arrays: ArrayRecord,
             node_ids: list[int],
-            message_type: str
+            message_type: str,
+            configs: list[ConfigRecord]
     ) -> list[Message]:
-        """Construct N Messages carrying the same RecordDict payload."""
-        messages = []
-        flows = cast(
-            list[list[int]],
-            json.loads(cast(bytes, record[self.configrecord_key]['flows']))
-        )
-        for node_id, flow_list in zip(node_ids, flows):
-            record_copy = record.copy()
-            config_copy = cast(ConfigRecord, record[self.configrecord_key].copy())
-            config_copy['flows'] = flow_list
-            record_copy[self.configrecord_key] = config_copy
-            messages.append(Message(record_copy, node_id, message_type))
+        """Construct N Messages carrying the different RecordDict payloads."""
+        messages: list[Message] = []
+        for node_id, config_record in zip(node_ids, configs):
+            record = RecordDict({
+                self.arrayrecord_key: arrays,
+                self.configrecord_key: config_record
+            })
+            messages.append(Message(record, node_id, message_type))
         return messages
 
     def aggregate_train(
-        self,
-        server_round: int,
-        replies: Iterable[Message],
+            self,
+            replies: Iterable[Message]
     ) -> tuple[Optional[ArrayRecord], Optional[MetricRecord]]:
         """Aggregate ArrayRecords and MetricRecords in the received Messages."""
         valid_replies, _ = self._check_and_log_replies(replies, is_train=True)
@@ -140,42 +126,30 @@ class FedCLIDSAvg(FedAvg):
             return None, None
 
         reply_contents = [msg.content for msg in valid_replies]
-        arrays: list[dict[str, Tensor]] = [
-            content[self.arrayrecord_key].to_torch_state_dict()
-            for content in reply_contents
-        ]
+        arrays: list[dict[str, Tensor]] = []
+        for content in reply_contents:
+            array_record = cast(ArrayRecord, content[self.arrayrecord_key])
+            arrays.append(array_record.to_torch_state_dict())
 
         aggregated_model: OrderedDict[str, Tensor] = OrderedDict()
-        # This iterates over all keys and averages a param's tensor
+        # Averages all of a tensor of a key
         with torch.no_grad():
             # Parameter key examples: 'network.9.weight', 'network.9.bias', ...
-            # Tensors already on cpu #sus 🤨
             for key in arrays[0].keys():
                 tensors_of_key = torch.stack([array[key] for array in arrays])
                 averaged_tensor = torch.mean(tensors_of_key, dim=0).cpu()
                 aggregated_model[key] = averaged_tensor
 
-        # Aggregate MetricRecords
-        metrics = self.train_metrics_aggr_fn(
-            reply_contents,
-            self.weighted_by_key,
-        )
+        metrics = aggregate_metricrecords(reply_contents, self.weighted_by_key)
         return ArrayRecord(aggregated_model), metrics
 
-    def aggregate_evaluate(
-            self,
-            server_round: int,
-            replies: Iterable[Message]
-    ) -> Optional[MetricRecord]:
+    def aggregate_evaluate(self, replies: Iterable[Message]) -> Optional[MetricRecord]:
         """Aggregate MetricRecords in the received Messages."""
         valid_replies, _ = self._check_and_log_replies(replies, is_train=False)
-
-        metrics = None
-        if valid_replies:
-            reply_contents = [msg.content for msg in valid_replies]
-            # Aggregate MetricRecords
-            metrics = aggregate_metricrecords(reply_contents, self.weighted_by_key)
-        return metrics
+        if not valid_replies:
+            return None
+        reply_contents = [msg.content for msg in valid_replies]
+        return aggregate_metricrecords(reply_contents, self.weighted_by_key)
 
     def start(
         self,
@@ -195,14 +169,23 @@ class FedCLIDSAvg(FedAvg):
         self.summary()
         log(INFO, "")
 
+        self.sample_nodes()
+
         # Initialize if None
-        train_config = train_config or []
-        evaluate_config = evaluate_config or []
+        train_config = train_config or [
+            ConfigRecord()
+            for _ in range(len(self.train_node_ids))
+        ]
+        evaluate_config = evaluate_config or [
+            ConfigRecord()
+            for _ in range(len(self.evaluate_node_ids))
+        ]
         result = Result()
 
         # Variables for recovery time to 95%
-        left_pointer = 1 # Points at day 1
+        left_pointer = 1 # Points to round 1
         total_auroc = 0.0
+        window_len = cast(int, self.context.run_config['n-aggregations'])
         result.evaluate_metrics_clientapp[-1] = MetricRecord({
             'recovery-seconds': -1.0,
             'recovery-round': -1
@@ -217,27 +200,16 @@ class FedCLIDSAvg(FedAvg):
                 current_day, current_round, self.num_rounds
             )
 
-            # -----------------------------------------------------------------
-            # --- TRAINING (CLIENTAPP-SIDE) -----------------------------------
-            # -----------------------------------------------------------------
-
             # Call strategy to configure training round
             # Send messages and wait for replies
+            train_messages = self.configure_train(current_array, train_config)
             train_replies = self.grid.send_and_receive(
-                messages=self.configure_train(
-                    current_round,
-                    current_array,
-                    train_config,
-                    self.grid,
-                ),
+                messages=train_messages,
                 timeout=self.timeout
             )
 
             # Aggregate train
-            agg_arrays, agg_train_metrics = self.aggregate_train(
-                current_round,
-                train_replies,
-            )
+            agg_arrays, agg_train_metrics = self.aggregate_train(train_replies)
 
             # Log training metrics and append to history
             if agg_arrays is not None:
@@ -247,27 +219,19 @@ class FedCLIDSAvg(FedAvg):
                 log(INFO, "\t└──> Aggregated MetricRecord: %s", agg_train_metrics)
                 result.train_metrics_clientapp[current_round] = agg_train_metrics
 
-            # -----------------------------------------------------------------
-            # --- EVALUATION (CLIENTAPP-SIDE) ---------------------------------
-            # -----------------------------------------------------------------
-
             # Call strategy to configure evaluation round
             # Send messages and wait for replies
+            evaluate_messages = self.configure_evaluate(
+                arrays=current_array,
+                configs=evaluate_config
+            )
             evaluate_replies: Iterable[Message] = self.grid.send_and_receive(
-                messages=self.configure_evaluate(
-                    current_round,
-                    current_array,
-                    evaluate_config,
-                    self.grid,
-                ),
+                messages=evaluate_messages,
                 timeout=self.timeout,
             )
 
-            # Aggregate evaluate
-            agg_evaluate_metrics = self.aggregate_evaluate(
-                current_round,
-                evaluate_replies,
-            )
+            # Aggregate metrics after collecting all metrics from eval nodes.
+            agg_evaluate_metrics = self.aggregate_evaluate(evaluate_replies)
             # Log training metrics and append to history
             if agg_evaluate_metrics is not None:
                 log(
@@ -280,21 +244,17 @@ class FedCLIDSAvg(FedAvg):
                 # left pointer will shrink (and remove itself)
                 if eval_metrics[-1]['recovery-round'] == -1 and current_day > 1:
                     total_auroc += cast(float, agg_evaluate_metrics['auroc'])
-                    if current_round > self.window_len:
+                    if current_round > window_len:
                         left_metric = eval_metrics[left_pointer]
                         total_auroc -= cast(float, left_metric['auroc'])
                         left_pointer += 1
-                    current_auroc = total_auroc / self.window_len
+                    current_auroc = total_auroc / window_len
                     auroc_threshold = 0.95 * cast(float, previous_roc)
-                    if (current_round >= self.window_len
+                    if (current_round >= window_len
                         and current_auroc >= auroc_threshold):
                         recovery_time = time.time() - t_start
                         eval_metrics[-1]['recovery-seconds'] = recovery_time
                         eval_metrics[-1]['recovery-round'] = current_round
-
-        # -----------------------------------------------------------------
-        # --- EVALUATION (SERVERAPP-SIDE) ---------------------------------
-        # -----------------------------------------------------------------
 
         log(INFO, "")
         log(INFO, "Strategy execution finished in %.2fs", time.time() - t_start)
@@ -309,7 +269,7 @@ class FedCLIDSAvg(FedAvg):
 
 def aggregate_metricrecords(
     records: list[RecordDict],
-    weighting_metric_name: str
+    weighting_metric_name: str,
 ) -> MetricRecord:
     """
     Modified weighted aggregation of MetricRecords using a specific key.
@@ -321,7 +281,6 @@ def aggregate_metricrecords(
         next(iter(record.metric_records.values()))
         for record in records
     ]
-    metric_records = cast(list[dict[str, float]], metric_records)
     weights = [
         cast(int, metric_dict[weighting_metric_name])
         for metric_dict in metric_records
@@ -334,8 +293,12 @@ def aggregate_metricrecords(
         ignored_keys=(weighting_metric_name, 'epsilon')
     )
 
+    # If called from train
+    if 'epsilon' not in metric_records[0]:
+        return aggregated_metrics
+
     # Writes the epsilon value since the other function would aggregate
-    # the sentinel value (-1)
+    # the sentinel value (-1) and weight by wrong value
     epsilon_metrics = [
         metric_dict
         for metric_dict in metric_records
@@ -345,15 +308,14 @@ def aggregate_metricrecords(
         metric_dict[weighting_metric_name]
         for metric_dict in epsilon_metrics
     ]
-    total_epsilon_weight = sum(epsilon_weights)
-    epsilon_weight_factors = [w / total_epsilon_weight for w in epsilon_weights]
+    total_epsilon = sum(epsilon_weights)
+    epsilon_weight_factors = [w / total_epsilon for w in epsilon_weights]
     # Empty if differential privacy is disabled
     aggregated_epsilon = _aggregation(
         metric_records=epsilon_metrics,
         weight_factors=epsilon_weight_factors,
         ignored_keys=(weighting_metric_name,)
     )
-
     aggregated_metrics['epsilon'] = aggregated_epsilon.get('epsilon', -1)
     return aggregated_metrics
 
@@ -368,18 +330,19 @@ def _aggregation(
         for key, value in metric_dict.items():
             if key in ignored_keys:
                 continue
-            default_type = list[float] if isinstance(value, list) else float
+            is_list = isinstance(value, list)
+            default_type = list[float] if is_list else float
             aggregated_value = aggregated_metrics.get(key, default_type())
-            if isinstance(value, list):
+            if is_list:
                 aggregated_value = cast(list[float], aggregated_value)
                 aggregated_value = aggregated_value or [0.0] * len(value)
                 aggregated_metrics[key] = [
-                    agg_val + val * weight
-                    for agg_val, val in zip(aggregated_value, value)
+                    current_val + val * weight
+                    for current_val, val in zip(aggregated_value, value)
                 ]
                 continue
-            agg_val = cast(float, aggregated_value)
-            aggregated_metrics[key] = agg_val + value * weight
+            current_val = cast(float, aggregated_value)
+            aggregated_metrics[key] = current_val + value * weight
     return aggregated_metrics
 
 def log_strategy_start_info(
@@ -407,11 +370,9 @@ def log_strategy_start_info(
     )
 
 def str_config(config: ConfigRecord) -> str:
-    """Ensures start log does not print all elements in flows"""
+    """Prevent printing all elements from flows (list) in ConfigRecord"""
     all_config_str: list[str] = []
     for key, value in config.items():
-        if key == 'flows':
-            value = json.loads(cast(bytes, value))
         if isinstance(value, bytes):
             string = f"'{key}': '<bytes>'"
         elif isinstance(value, list):
