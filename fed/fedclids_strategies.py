@@ -44,16 +44,15 @@ class FedCLIDSAvg(FedAvg):
             server_round: int,
             arrays: ArrayRecord,
             config: ConfigRecord,
-            grid: Grid
     ) -> Iterable[Message]:
         """Configure the next round of federated training"""
         if self.fraction_train == 0.0:
             return []
         if not self.train_node_ids:
-            num_nodes = int(len(list(grid.get_node_ids())) * self.fraction_train)
+            num_nodes = int(len(list(self.grid.get_node_ids())) * self.fraction_train)
             sample_size = max(num_nodes, self.min_train_nodes)
             self.train_node_ids, self.all_node_ids = sample_nodes(
-                grid=grid,
+                grid=self.grid,
                 min_available_nodes=self.min_available_nodes,
                 sample_size=sample_size
             )
@@ -80,16 +79,15 @@ class FedCLIDSAvg(FedAvg):
             self, server_round: int,
             arrays: ArrayRecord,
             config: ConfigRecord,
-            grid: Grid
     ) -> Iterable[Message]:
         """Configure the next round of federated evaluation"""
         if self.fraction_evaluate == 0.0:
             return []
 
         if not self.evaluate_node_ids:
-            num_nodes = int(len(list(grid.get_node_ids())) * self.fraction_evaluate)
+            num_nodes = int(len(list(self.grid.get_node_ids())) * self.fraction_evaluate)
             sample_size = max(num_nodes, self.min_evaluate_nodes)
-            node_ids, _ = sample_nodes(grid, self.min_available_nodes, sample_size)
+            node_ids, _ = sample_nodes(self.grid, self.min_available_nodes, sample_size)
             self.evaluate_node_ids = node_ids
         log(
             INFO, "configure_evaluate: Sampled %s nodes (out of %s)",
@@ -187,40 +185,6 @@ class FedCLIDSAvg(FedAvg):
         train_config: Optional[list[ConfigRecord]] = None,
         evaluate_config: Optional[list[ConfigRecord]] = None
     ) -> Result:
-        """Execute the federated learning strategy.
-
-        Runs the complete federated learning workflow for the specified number of
-        rounds, including training, evaluation, and optional centralized evaluation.
-
-        Parameters
-        ----------
-        grid : Grid
-            The Grid instance used to send/receive Messages from nodes executing a
-            ClientApp.
-        initial_arrays : ArrayRecord
-            Initial model parameters (arrays) to be used for federated learning.
-        num_rounds : int (default: 3)
-            Number of federated learning rounds to execute.
-        timeout : float (default: 3600)
-            Timeout in seconds for waiting for node responses.
-        train_config : ConfigRecord, optional
-            Configuration to be sent to nodes during training rounds.
-            If unset, an empty ConfigRecord will be used.
-        evaluate_config : ConfigRecord, optional
-            Configuration to be sent to nodes during evaluation rounds.
-            If unset, an empty ConfigRecord will be used.
-        evaluate_fn : Callable[[int, ArrayRecord], Optional[MetricRecord]], optional
-            Optional function for centralized evaluation of the global model. Takes
-            server round number and array record, returns a MetricRecord or None. If
-            provided, will be called before the first round and after each round.
-            Defaults to None.
-
-        Returns
-        -------
-        Results
-            Results containing final model arrays and also training metrics, evaluation
-            metrics and global evaluation metrics (if provided) from all rounds.
-        """
         log(INFO, "Starting %s strategy:", self.__class__.__name__)
         log_strategy_start_info(
             num_rounds=self.num_rounds,

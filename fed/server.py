@@ -168,7 +168,7 @@ class Server:
         """Splits flows into train and evaluate and distributes them among
         n_clients for each respective flow"""
         # 80/20 split
-        train_eval_split = self._split_data(
+        train_split, eval_split = self._split_data(
             raw_flows=raw_flows,
             csv_path=UAVIDS_DATA_PATH
         )
