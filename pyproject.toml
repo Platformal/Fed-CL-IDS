@@ -42,10 +42,10 @@ resample-nodes = false
 days = 4
 epochs = 2
 rounds = 60
-batch-size = 128
 # How many recent metrics to aggregate after each day
 # Also used for how many to aggregate and compare for recovery time (FedAvg)
 n-aggregations = 10
+batch-size = 128
 
 mlp-widths = "256,256,128,64"
 mlp-dropout = 0.2
@@ -56,7 +56,7 @@ mlp-lr-min = 1e-4
 cl-enabled = true
 ewc-lambda = 50
 er-memory = 0.005
-er-mix-ratio = 0.2 # (0, 1)
+er-mix-ratio = 0.2
 n-features = 18
 
 dp-enabled = true

@@ -124,23 +124,43 @@ class Server:
             day_epsilon = sum(map(lambda record: record['epsilon'], all_rounds))
             self.total_epsilon += day_epsilon
 
-        dp_enabled = self.config.dp_enabled
-        round_epsilon_day = round(day_epsilon, 6)
-        round_total_epsilon = round(self.total_epsilon, 6)
+        values = {
+            # key: (value, rounding, sentinel_value)
+            'daily_epsilon': (day_epsilon, 6, self.config.dp_enabled),
+            'total_epsilon': (self.total_epsilon, 6, self.config.dp_enabled),
+            'recovery-seconds': (recovery_metric['recovery-seconds'], 3, -1),
+            'recovery-round': (recovery_metric['recovery-round'], 0, -1)
+        }
+        formatted_values = self._format_values(values)
         text = [
             f"Day {day}",
             f"{self.config.n_train_clients}/{self.config.total_clients} train",
             f"Rounds: {self.config.n_rounds}",
-            f"Day Epsilon: {round_epsilon_day if dp_enabled else None}, "
-            f"Total Epsilon: {round_total_epsilon if dp_enabled else None}",
-            f"Recovery Time (sec): {round(recovery_metric['recovery-seconds'], 3)}, "
-            f"Recovery Rounds: {recovery_metric['recovery-round']}",
+            f"Day Epsilon: {formatted_values['daily_epsilon']}, "
+            f"Total Epsilon: {formatted_values['total_epsilon']}",
+            f"Recovery Time (sec): {formatted_values['recovery-seconds']}, "
+            f"Recovery Rounds: {formatted_values['recovery-round']}",
             f"{agg_metrics}\n"
         ]
         with METRICS_PATH.open('a', encoding='utf-8') as file:
             file.write(' | '.join(text))
             if day == self.config.n_days:
                 file.write('\n')
+
+    def _format_values(
+            self,
+            values: dict[str, tuple[float, int, bool | int | float]]
+    ) -> dict[str, Optional[float]]:
+        new_dict: dict[str, Optional[float]] = {}
+        for key, (value, rounding, sentinel_value) in values.items():
+            if isinstance(sentinel_value, bool) and not sentinel_value:
+                value = None
+            elif isinstance(sentinel_value, int) and value == sentinel_value:
+                value = None
+            else:
+                value = round(value, rounding)
+            new_dict[key] = value
+        return new_dict
 
     def get_uavids(self, filepath: Path) -> dict[str, list[int]]:
         """Opens form yaml file, and filters days from configuration file."""
