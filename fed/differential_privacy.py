@@ -1,14 +1,19 @@
 """Extension of Opacus' Privacy Engine to get epsilon per round."""
 import warnings
+import logging
+
 from opacus import PrivacyEngine
 
+# PrivacyEngine causes duplicate INFO logging
+logging.getLogger().handlers.clear()
 warnings.filterwarnings('ignore')
 
 class DifferentialPrivacy(PrivacyEngine):
     def __init__(
             self, *,
             accountant: str = 'rdp',
-            secure_mode: bool = False) -> None:
+            secure_mode: bool = False
+    ) -> None:
         super().__init__(accountant=accountant, secure_mode=secure_mode)
         self.previous_epsilon: float = 0.0
 

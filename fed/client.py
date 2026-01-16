@@ -60,14 +60,12 @@ class Client:
         self.model: MLP = self._initialize_model(context)
         self.criterion = torch.nn.BCEWithLogitsLoss() # Returns on device
 
+        self.dp = DifferentialPrivacy()
         self.cl = ContinualLearning(
             er_filepath_identifier=os.getpid(), # or Node ID
             er_runtime_directory=RUNTIME_PATH,
             device=self.config.device
         )
-        self.dp = DifferentialPrivacy()
-        # Only training nodes can fetch epsilon.
-        self.stored_epsilon: Optional[float] = None
 
         # Data cache (probably will be removed with CIC-IDS)
         self.dataframe: pd.DataFrame
@@ -181,15 +179,9 @@ class Client:
 
         if isinstance(training_model, GradSampleModule):
             self.model = cast(MLP, training_model.to_standard_module())
-            if self.stored_epsilon is not None:
-                raise TypeError("Epsilon needs to be None from evaluation.")
-            self.stored_epsilon = self.dp.get_epsilon(self.config.delta)
 
         if self.config.cl_enabled:
-            self.cl.er.add_data(
-                original_dataset=train_set,
-                sample_rate=self.config.er_sample_rate
-            )
+            self.cl.er.add_data(train_set, self.config.er_sample_rate)
             self.cl.ewc.update_fisher_information(
                 model=self.model,
                 train_set=train_set,
@@ -299,16 +291,11 @@ class Client:
             probabilities: Tensor
     ) -> dict[str, float]:
         """Generates general metrics and resets the epsilon it has value."""
-        training_epsilon = -1 # Default sentinel value
-        if self.stored_epsilon is not None:
-            training_epsilon = self.stored_epsilon
-            self.stored_epsilon = None
         fed_cl_ids_metrics = {
             'auroc': FedMetrics.auroc(labels, probabilities),
             'auprc': FedMetrics.auprc(labels, probabilities),
             'macro-f1': FedMetrics.macro_f1(labels, predictions),
             'recall@fpr=1%': FedMetrics.recall_at_fpr(labels, probabilities, 0.01),
-            'epsilon': training_epsilon
         }
         return fed_cl_ids_metrics
 
@@ -371,6 +358,7 @@ def client_train(client: Client, msg: Message) -> Message:
     client_parameters = cast(OrderedDict, client.model.state_dict())
     metrics = {
         'train_loss': average_loss,
+        'epsilon': client.dp.get_epsilon(client.config.delta),
         'num-examples': n_samples
     }
     content = RecordDict({

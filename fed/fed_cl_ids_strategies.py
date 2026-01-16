@@ -1,8 +1,8 @@
-from typing import Optional, Iterable, Container, cast
+from typing import Optional, Iterable, cast
 from collections import OrderedDict
 from logging import INFO
+from io import StringIO
 import time
-import io
 
 from flwr.common import (
     ArrayRecord, ConfigRecord, MetricRecord,
@@ -29,11 +29,9 @@ class FedCLIDSAvg(FedAvg):
         self.grid = grid
         self.context = context
         self.num_rounds = num_rounds
-        self.train_node_ids: list[int] = []
-        self.evaluate_node_ids: list[int] = []
-        self.all_node_ids: list[int] = []
-        device_str = 'cuda' if torch.cuda.is_available() else 'cpu'
-        self.device = torch.device(device_str)
+        self.train_nodes: list[int] = []
+        self.evaluate_nodes: list[int] = []
+        self.all_nodes: list[int] = list(grid.get_node_ids())
         self.timeout = 3600
 
     # Changed sample_nodes function only to initialize
@@ -47,11 +45,11 @@ class FedCLIDSAvg(FedAvg):
             return []
         log(
             INFO, "configure_train: Sampled %s nodes (out of %s)",
-            len(self.train_node_ids), len(self.all_node_ids)
+            len(self.train_nodes), len(self.all_nodes)
         )
         messages = self._construct_messages(
             arrays=arrays,
-            node_ids=self.train_node_ids,
+            node_ids=self.train_nodes,
             message_type=MessageType.TRAIN,
             configs=configs
         )
@@ -68,32 +66,35 @@ class FedCLIDSAvg(FedAvg):
             return []
         log(
             INFO, "configure_evaluate: Sampled %s nodes (out of %s)",
-            len(self.evaluate_node_ids), len(self.all_node_ids)
+            len(self.evaluate_nodes), len(self.all_nodes)
         )
         messages = self._construct_messages(
             arrays=arrays,
-            node_ids=self.evaluate_node_ids,
+            node_ids=self.evaluate_nodes,
             message_type=MessageType.EVALUATE,
             configs=configs
         )
         return messages
 
-    def sample_nodes(self) -> None:
-        """Modifies node IDs of train, evaluate, and all node IDs"""
-        # Non-persistent train/eval nodes & n_all_nodes -> len(self.all_node_ids)
-        if self.all_node_ids:
+    def sample_nodes(self, resample_nodes: bool = False) -> None:
+        """
+        Modifies node IDs of train, evaluate, and all node IDs.
+        If resampling enabled, it will randomly select train and evaluate
+        nodes again if it isn't the first time sampling.
+        """
+        if not resample_nodes and (self.train_nodes or self.evaluate_nodes):
             return
-        n_all_nodes = len(list(self.grid.get_node_ids()))
-        if self.fraction_train:
+        n_all_nodes = len(self.all_nodes)
+        if self.fraction_evaluate > 0.0:
             n_train = int(self.fraction_train * n_all_nodes)
-            self.train_node_ids, self.all_node_ids = sample_nodes(
+            self.train_nodes, _ = sample_nodes(
                 grid=self.grid,
                 min_available_nodes=self.min_available_nodes,
                 sample_size=max(n_train, self.min_train_nodes)
             )
-        if self.fraction_evaluate:
+        if self.fraction_evaluate > 0.0:
             n_evaluate = int(self.fraction_evaluate * n_all_nodes)
-            self.evaluate_node_ids, _ = sample_nodes(
+            self.evaluate_nodes, _ = sample_nodes(
                 grid=self.grid,
                 min_available_nodes=self.min_available_nodes,
                 sample_size=max(n_evaluate, self.min_available_nodes)
@@ -120,7 +121,7 @@ class FedCLIDSAvg(FedAvg):
             self,
             replies: Iterable[Message]
     ) -> tuple[Optional[ArrayRecord], Optional[MetricRecord]]:
-        """Aggregate ArrayRecords and MetricRecords in the received Messages."""
+        """Aggregate ArrayRecords and MetricRecords from response Messages."""
         valid_replies, _ = self._check_and_log_replies(replies, is_train=True)
         if not valid_replies:
             return None, None
@@ -137,8 +138,7 @@ class FedCLIDSAvg(FedAvg):
             # Parameter key examples: 'network.9.weight', 'network.9.bias', ...
             for key in arrays[0].keys():
                 tensors_of_key = torch.stack([array[key] for array in arrays])
-                averaged_tensor = torch.mean(tensors_of_key, dim=0).cpu()
-                aggregated_model[key] = averaged_tensor
+                aggregated_model[key] = torch.mean(tensors_of_key, dim=0).cpu()
 
         metrics = aggregate_metricrecords(reply_contents, self.weighted_by_key)
         return ArrayRecord(aggregated_model), metrics
@@ -167,18 +167,18 @@ class FedCLIDSAvg(FedAvg):
             evaluate_config=evaluate_config
         )
         self.summary()
-        log(INFO, "")
+        log(INFO, '')
 
-        self.sample_nodes()
+        self.sample_nodes(cast(bool, self.context.run_config['resample-nodes']))
 
         # Initialize if None
         train_config = train_config or [
             ConfigRecord()
-            for _ in range(len(self.train_node_ids))
+            for _ in range(len(self.train_nodes))
         ]
         evaluate_config = evaluate_config or [
             ConfigRecord()
-            for _ in range(len(self.evaluate_node_ids))
+            for _ in range(len(self.evaluate_nodes))
         ]
         result = Result()
 
@@ -194,7 +194,7 @@ class FedCLIDSAvg(FedAvg):
         t_start = time.time()
         current_array = initial_arrays
         for current_round in range(1, self.num_rounds + 1):
-            log(INFO, "")
+            log(INFO, '')
             log(
                 INFO, "[DAY %s | ROUND %s/%s]",
                 current_day, current_round, self.num_rounds
@@ -216,7 +216,11 @@ class FedCLIDSAvg(FedAvg):
                 result.arrays = agg_arrays
                 current_array = agg_arrays
             if agg_train_metrics is not None:
-                log(INFO, "\t└──> Aggregated MetricRecord: %s", agg_train_metrics)
+                rounded_metrics = {
+                    key: round(value, 6)
+                    for key, value in agg_train_metrics.items()
+                }
+                log(INFO, "\t└──> Aggregated MetricRecord: %s", rounded_metrics)
                 result.train_metrics_clientapp[current_round] = agg_train_metrics
 
             # Call strategy to configure evaluation round
@@ -234,11 +238,14 @@ class FedCLIDSAvg(FedAvg):
             agg_evaluate_metrics = self.aggregate_evaluate(evaluate_replies)
             # Log training metrics and append to history
             if agg_evaluate_metrics is not None:
-                log(
-                    INFO, "\t└──> Aggregated MetricRecord: %s",
-                    agg_evaluate_metrics
-                )
+                rounded_metrics = {
+                    key: round(value, 6)
+                    for key, value in agg_evaluate_metrics.items()
+                }
+                log(INFO, "\t└──> Aggregated MetricRecord: %s", rounded_metrics)
                 eval_metrics = result.evaluate_metrics_clientapp
+                epsilon = cast(MetricRecord, agg_train_metrics)['epsilon']
+                agg_evaluate_metrics['epsilon'] = epsilon
                 eval_metrics[current_round] = agg_evaluate_metrics
                 # current_round acts as the right pointer of the window,
                 # left pointer will shrink (and remove itself)
@@ -256,20 +263,20 @@ class FedCLIDSAvg(FedAvg):
                         eval_metrics[-1]['recovery-seconds'] = recovery_time
                         eval_metrics[-1]['recovery-round'] = current_round
 
-        log(INFO, "")
+        log(INFO, '')
         log(INFO, "Strategy execution finished in %.2fs", time.time() - t_start)
-        log(INFO, "")
+        log(INFO, '')
         log(INFO, "Final results:")
-        log(INFO, "")
-        for line in io.StringIO(str(result)):
+        log(INFO, '')
+        for line in StringIO(str(result)):
             log(INFO, "\t%s", line.strip("\n"))
-        log(INFO, "")
+        log(INFO, '')
         return result
 
 
 def aggregate_metricrecords(
     records: list[RecordDict],
-    weighting_metric_name: str,
+    weight_key: str,
 ) -> MetricRecord:
     """
     Modified weighted aggregation of MetricRecords using a specific key.
@@ -282,7 +289,7 @@ def aggregate_metricrecords(
         for record in records
     ]
     weights = [
-        cast(int, metric_dict[weighting_metric_name])
+        cast(int, metric_dict[weight_key])
         for metric_dict in metric_records
     ]
     total_weight = sum(weights)
@@ -290,45 +297,20 @@ def aggregate_metricrecords(
     aggregated_metrics = _aggregation(
         metric_records=metric_records,
         weight_factors=weight_factors,
-        ignored_keys=(weighting_metric_name, 'epsilon')
+        weight_key=weight_key
     )
-
-    # If called from train
-    if 'epsilon' not in metric_records[0]:
-        return aggregated_metrics
-
-    # Writes the epsilon value since the other function would aggregate
-    # the sentinel value (-1) and weight by wrong value
-    epsilon_metrics = [
-        metric_dict
-        for metric_dict in metric_records
-        if metric_dict['epsilon'] >= 0
-    ]
-    epsilon_weights = [
-        metric_dict[weighting_metric_name]
-        for metric_dict in epsilon_metrics
-    ]
-    total_epsilon = sum(epsilon_weights)
-    epsilon_weight_factors = [w / total_epsilon for w in epsilon_weights]
-    # Empty if differential privacy is disabled
-    aggregated_epsilon = _aggregation(
-        metric_records=epsilon_metrics,
-        weight_factors=epsilon_weight_factors,
-        ignored_keys=(weighting_metric_name,)
-    )
-    aggregated_metrics['epsilon'] = aggregated_epsilon.get('epsilon', -1)
     return aggregated_metrics
 
 def _aggregation(
         metric_records: Iterable[MetricRecord],
         weight_factors: Iterable[float],
-        ignored_keys: Container[str]
+        weight_key: str
 ) -> MetricRecord:
     """Aggregates MetricRecords in respect to given weights"""
     aggregated_metrics = MetricRecord()
     for metric_dict, weight in zip(metric_records, weight_factors):
         for key, value in metric_dict.items():
-            if key in ignored_keys:
+            if key == weight_key:
                 continue
             is_list = isinstance(value, list)
             default_type = list[float] if is_list else float

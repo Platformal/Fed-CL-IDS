@@ -33,14 +33,15 @@ serverapp = "fed.server:app"
 clientapp = "fed.client:app"
 
 # Custom config values accessible via `context.run_config`
-# Example: flwr run -c 'max-days=2 n-rounds=3'
+# Example: flwr run -c 'days=2 rounds=3'
 # Flower context.config can only process str, bool, float, int, str
 [tool.flwr.app.config]
 fraction-train = 0.5
 fraction-evaluate = 1.0
-max-days = 4
+resample-nodes = false
+days = 4
 epochs = 2
-n-rounds = 60
+rounds = 60
 batch-size = 128
 # How many recent metrics to aggregate after each day
 # Also used for how many to aggregate and compare for recovery time (FedAvg)

@@ -36,9 +36,9 @@ class ServerConfiguration:
         self.n_train_clients = int(self.total_clients * self.fraction_train)
         self.n_evaluate_clients = int(self.total_clients * self.fraction_evaluate)
 
-        self.n_days = cast(int, context.run_config['max-days'])
+        self.n_days = cast(int, context.run_config['days'])
         self.n_aggregate = cast(int, context.run_config['n-aggregations'])
-        self.n_rounds = cast(int, context.run_config['n-rounds'])
+        self.n_rounds = cast(int, context.run_config['rounds'])
         self.dp_enabled = cast(bool, context.run_config['dp-enabled'])
 
 class Server:
@@ -119,13 +119,13 @@ class Server:
         # Saves most recent aggregated data from the rounds not average per day
         torch.save(self.current_parameters, OUTPUT_PATH / f'day{day}.pt')
 
-        sum_epsilon_day = 0.0
+        day_epsilon = 0.0
         if self.config.dp_enabled:
-            sum_epsilon_day = sum(map(lambda record: record['epsilon'], all_rounds))
-            self.total_epsilon += sum_epsilon_day
+            day_epsilon = sum(map(lambda record: record['epsilon'], all_rounds))
+            self.total_epsilon += day_epsilon
 
         dp_enabled = self.config.dp_enabled
-        round_epsilon_day = round(sum_epsilon_day, 6)
+        round_epsilon_day = round(day_epsilon, 6)
         round_total_epsilon = round(self.total_epsilon, 6)
         text = [
             f"Day {day}",
