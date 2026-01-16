@@ -155,20 +155,24 @@ class Server:
         for key, (value, rounding, sentinel_value) in values.items():
             if isinstance(sentinel_value, bool) and not sentinel_value:
                 value = None
-            elif isinstance(sentinel_value, int) and value == sentinel_value:
+            elif isinstance(sentinel_value, (int, float)) and value == sentinel_value:
                 value = None
             else:
                 value = round(value, rounding)
             new_dict[key] = value
         return new_dict
 
-    def get_uavids(self, filepath: Path) -> dict[str, list[int]]:
+    def get_uavids(self, filepath: Path) -> dict[int, list[int]]:
         """Opens form yaml file, and filters days from configuration file."""
         with filepath.open(encoding='utf-8') as file:
-            raw_days: dict[str, list[int]] = yaml.safe_load(file)
+            raw_days = cast(dict[int, list[int]], yaml.safe_load(file))
         # Assuming dict is sorted/ordered by days
-        filtered_days = list(raw_days.items())[:self.config.n_days]
-        return dict(filtered_days)
+        # filtered_days = list(raw_days.items())[:self.config.n_days]
+        filtered_days = {
+            i: raw_days[i]
+            for i in range(1, self.config.n_days + 1)
+        }
+        return filtered_days
 
     def _distribute_flows(self, flows: Iterable[int], n_clients: int) -> list[list[int]]:
         """Hash each flow by ID and assign to a bucket for each client."""
@@ -216,26 +220,25 @@ def main(grid: Grid, context: Context) -> None:
     if RUNTIME_PATH.exists():
         clear_directory(RUNTIME_PATH)
     else:
-        RUNTIME_PATH.mkdir(exist_ok=True)
+        RUNTIME_PATH.mkdir()
 
     server = Server(grid, context)
-    uavids_days = server.get_uavids(UAVIDS_DAYS_PATH)
     daily_metric_logs: list[list[MetricRecord]] = []
     previous_roc: Optional[float] = None
 
     start = time.time()
-    for day, raw_flows in enumerate(uavids_days.values(), 1):
+    for day, raw_flows in server.get_uavids(UAVIDS_DAYS_PATH).items():
         train_flows, evaluate_flows = server.get_data_flows(raw_flows)
-        result = server.federated_model.start(
+        daily_result = server.federated_model.start(
             initial_arrays=ArrayRecord(server.current_parameters),
             current_day=day,
             previous_roc=previous_roc,
             train_config=train_flows,
             evaluate_config=evaluate_flows
         )
-        server.current_parameters = result.arrays.to_torch_state_dict()
+        server.current_parameters = daily_result.arrays.to_torch_state_dict()
 
-        all_rounds = result.evaluate_metrics_clientapp
+        all_rounds = daily_result.evaluate_metrics_clientapp
         recovery_metric = cast(dict[str, float], all_rounds.pop(-1))
         clean_metrics = list(all_rounds.values())
 

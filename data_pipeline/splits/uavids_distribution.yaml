@@ -1,25 +1,25 @@
-Day1:
+1:
   Normal Traffic: 0.85
   Blackhole Attack: 0.05
   Flooding Attack: 0.05
   Sybil Attack: 0.00
   Wormhole Attack: 0.05
 
-Day2:
+2:
   Normal Traffic: 0.60
   Blackhole Attack: 0.10
   Flooding Attack: 0.20
   Sybil Attack: 0.05
   Wormhole Attack: 0.05
 
-Day3:
+3:
   Normal Traffic: 0.50
   Blackhole Attack: 0.10
   Flooding Attack: 0.10
   Sybil Attack: 0.20
   Wormhole Attack: 0.10
 
-Day4:
+4:
   Normal Traffic: 0.40
   Blackhole Attack: 0.15
   Flooding Attack: 0.10
