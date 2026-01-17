@@ -62,7 +62,7 @@ class ElasticWeightConsolidation:
     ) -> None:
         """
         Calculates the fisher diagonal from the current model and training data.
-        Does not modify the model
+        Does not modify the model.
         """
         model.eval()
         if not isinstance(model, MLP):
@@ -149,7 +149,11 @@ class ExperienceReplay:
             original_dataset: tuple[Tensor, Tensor],
             sample_rate: float
     ) -> None:
-        """Add to replay buffer. Detaches and moves tensor to the CPU"""
+        """
+        Add to replay buffer. Detaches and moves tensor to the CPU.
+        Sample rate is the percentage of original dataset to add 
+        (on average if dataset is very small)
+        """
         features, labels = original_dataset
         n_new_samples = len(labels)
         # Prefer to get exact amount if n_samples * sample rate is big enough

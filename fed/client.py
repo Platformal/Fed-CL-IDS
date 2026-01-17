@@ -138,6 +138,7 @@ class Client:
         return result
 
     def _train(self, train_set: tuple[Tensor, Tensor]) -> tuple[float, int]:
+        loop_start = time()
         self.model.train()
         if self.config.cl_enabled:
             train_set = self.cl.er.sample_replay_buffer(
@@ -153,8 +154,7 @@ class Client:
         )
         data_loader = cast(DataLoader[tuple[Tensor, Tensor]], data_loader)
         # PrivacyEngine objects wrap around the original objects
-        # N forward passes + N backward passes per batch (where N = batch size)
-        # Time is relative to size of dataset to train
+        # N forward passes + N backward passes per batch (N = batch size)
         packages = self._create_model_packages(data_loader)
         training_model, optimizer, data_loader = packages
         scheduler = self.model.get_scheduler(
@@ -162,10 +162,8 @@ class Client:
             cosine_epochs=len(data_loader) * self.config.epochs
         )
 
-        # Total_loss is mutated in _train_iteration()
         total_loss = self._zero_tensor()
         total_samples = 0
-        loop_start = time()
         for _ in range(self.config.epochs):
             loss, n_samples = self._train_iteration(
                 model=training_model,
@@ -175,7 +173,6 @@ class Client:
             )
             total_loss += loss
             total_samples += n_samples
-        print(f"Training Loop: {time() - loop_start} sec")
 
         if isinstance(training_model, GradSampleModule):
             self.model = cast(MLP, training_model.to_standard_module())
@@ -190,6 +187,7 @@ class Client:
             )
             self.cl.ewc.update_prev_parameters(self.model)
         average_loss = total_loss / max(1, total_samples)
+        print(f"Training Time: {time() - loop_start:.3f} sec")
         return average_loss.item(), total_samples // self.config.epochs
 
     def _train_iteration(
@@ -199,7 +197,7 @@ class Client:
             scheduler: CosineAnnealingLR,
             data_loader: DataLoader[tuple[Tensor, Tensor]],
     ) -> tuple[Tensor, int]:
-        n_samples: int = 0
+        n_samples = 0
         iteration_loss = self._zero_tensor()
         for batch in data_loader:
             batch_features, batch_labels = cast(tuple[Tensor, Tensor], batch)
@@ -234,11 +232,10 @@ class Client:
     def evaluate(self, test_set: tuple[Tensor, Tensor]) -> tuple[dict[str, float], int]:
         """Evaluates server aggregated model against the test set."""
         self.model.eval()
-        data_loader = DataLoader(
-            dataset=TensorDataset(*test_set),
-            batch_size=self.config.batch_size
+        data_loader = cast(
+            DataLoader[tuple[Tensor, Tensor]],
+            DataLoader(TensorDataset(*test_set), self.config.batch_size)
         )
-        data_loader = cast(DataLoader[tuple[Tensor, Tensor]], data_loader)
         packages = self._create_model_packages(data_loader)
         evaluation_model, _, data_loader = packages
 
@@ -323,10 +320,7 @@ class Client:
         return dp_model, dp_optimizer, dp_data_loader
 
     def _zero_tensor(self) -> Tensor:
-        """
-        Mainly used to avoid .item() sync overhead for tensors since
-        you can queue tensor operations for GPU to do.
-        """
+        """Using tensor variables to reduce Tensor.item() sync overhead."""
         return torch.tensor(0.0, dtype=torch.float32, device=self.config.device)
 
 
@@ -354,7 +348,7 @@ def client_train(client: Client, msg: Message) -> Message:
     flow_ids = cast(list[int], msg.content['config']['flows'])
     train_set = client.get_flow_data(flow_ids)
     average_loss, n_samples = client.train(train_set, profile_on)
-    # state_dict() auto detaches from grad, but still on cuda
+    # state_dict() detaches from grad, but still on cuda
     client_parameters = cast(OrderedDict, client.model.state_dict())
     metrics = {
         'train_loss': average_loss,

@@ -1,7 +1,6 @@
 """Starts federated learning from simulation and configuration file"""
 from typing import Optional, Iterable, cast
 from collections import OrderedDict
-from dataclasses import dataclass
 from pathlib import Path
 import hashlib
 import time
@@ -26,7 +25,6 @@ RUNTIME_PATH = MAIN_PATH / 'runtime'
 OUTPUT_PATH = MAIN_PATH / 'outputs'
 METRICS_PATH = OUTPUT_PATH / 'metrics.txt'
 
-@dataclass()
 class ServerConfiguration:
     """Stores configurations from pyproject.toml"""
     def __init__(self, grid: Grid, context: Context) -> None:
@@ -70,38 +68,10 @@ class Server:
         )
         return cast(OrderedDict, model.state_dict())
 
-    def _split_data(
-            self,
-            raw_flows: list[int],
-            train_ratio: float = 0.8,
-            random_seed: Optional[int] = None,
-            csv_path: Optional[Path] = None
-    ) -> tuple[list[int], list[int]]:
-        """
-        Splits a list of flow IDs into two datasets.
-        Can optionally be stratified by passing in csv filepath.
-        """
-        labels: Optional[pd.Series] = None
-        if csv_path:
-            if self.dataframe_path is None or self.dataframe_path != csv_path:
-                self.dataframe_path = csv_path
-                self.dataframe = pd.read_csv(
-                    filepath_or_buffer=csv_path,
-                    dtype={'label': 'uint8'},
-                    index_col='FlowID'
-                )
-            labels = self.dataframe.loc[raw_flows]['label']
-        splits = train_test_split(
-            raw_flows,
-            train_size=train_ratio,
-            random_state=random_seed,
-            stratify=labels
-        )
-        return tuple(splits)
-
-    def aggregate_records(self, metrics: list[dict[str, float]]) -> dict[str, float]:
+    def aggregate_records(self, metric_records: list[MetricRecord]) -> dict[str, float]:
         "Standard arithmetic averaging of given MetricRecords"
-        n_recent = len(metrics)
+        n_recent = len(metric_records)
+        metrics = cast(list[dict[str, float]], metric_records)
         eval_metrics = {
             key: round(sum(record[key] for record in metrics) / n_recent, 6)
             for key in metrics[0].keys()
@@ -111,7 +81,7 @@ class Server:
     def log_results(
             self,
             day: int,
-            all_rounds: list[dict[str, float]],
+            all_rounds: list[MetricRecord],
             agg_metrics: dict[str, float],
             recovery_metric: dict[str, float]
     ) -> None:
@@ -121,7 +91,8 @@ class Server:
 
         day_epsilon = 0.0
         if self.config.dp_enabled:
-            day_epsilon = sum(map(lambda record: record['epsilon'], all_rounds))
+            rounds = cast(list[dict[str, float]], all_rounds)
+            day_epsilon = sum(map(lambda record: record['epsilon'], rounds))
             self.total_epsilon += day_epsilon
 
         values = {
@@ -166,23 +137,11 @@ class Server:
         """Opens form yaml file, and filters days from configuration file."""
         with filepath.open(encoding='utf-8') as file:
             raw_days = cast(dict[int, list[int]], yaml.safe_load(file))
-        # Assuming dict is sorted/ordered by days
-        # filtered_days = list(raw_days.items())[:self.config.n_days]
         filtered_days = {
             i: raw_days[i]
             for i in range(1, self.config.n_days + 1)
         }
         return filtered_days
-
-    def _distribute_flows(self, flows: Iterable[int], n_clients: int) -> list[list[int]]:
-        """Hash each flow by ID and assign to a bucket for each client."""
-        clients = [[] for _ in range(n_clients)]
-        for flow_id in flows:
-            id_bytes = str(flow_id).encode()
-            id_hash = hashlib.sha256(id_bytes).hexdigest()
-            i = int(id_hash, 16) % n_clients
-            clients[i].append(flow_id)
-        return clients
 
     def get_data_flows(
             self,
@@ -195,8 +154,8 @@ class Server:
             raw_flows=raw_flows,
             csv_path=UAVIDS_DATA_PATH
         )
-        # Train flows (80%) gets hashed into 5 clients (fraction train = 0.5)
-        # Evaluate flows (20%) gets hashed into 10 clients (evaluate = 1.0)
+        # Train flows (80%) gets hashed into 5 clients (train_pf = 0.5)
+        # Evaluate flows (20%) gets hashed into 10 clients (evaluate_pf = 1.0)
         train_tasks, eval_tasks = map(
             self._distribute_flows,
             (train_split, eval_split),
@@ -211,6 +170,45 @@ class Server:
             for client_flows in eval_tasks
         ]
         return train_records, eval_records
+
+    def _split_data(
+            self,
+            raw_flows: list[int],
+            train_ratio: float = 0.8,
+            random_seed: Optional[int] = None,
+            csv_path: Optional[Path] = None
+    ) -> tuple[list[int], list[int]]:
+        """
+        Splits a list of flow IDs into two datasets.
+        Can optionally be stratified by passing in csv filepath.
+        """
+        labels: Optional[pd.Series] = None
+        if csv_path:
+            if self.dataframe_path is None or self.dataframe_path != csv_path:
+                self.dataframe_path = csv_path
+                self.dataframe = pd.read_csv(
+                    filepath_or_buffer=csv_path,
+                    dtype={'label': 'uint8'},
+                    index_col='FlowID'
+                )
+            labels = self.dataframe.loc[raw_flows]['label']
+        splits = train_test_split(
+            raw_flows,
+            train_size=train_ratio,
+            random_state=random_seed,
+            stratify=labels
+        )
+        return tuple(splits)
+
+    def _distribute_flows(self, flows: Iterable[int], n_clients: int) -> list[list[int]]:
+        """Hash each flow by ID and assign to a bucket for each client."""
+        clients = [[] for _ in range(n_clients)]
+        for flow_id in flows:
+            id_bytes = str(flow_id).encode()
+            id_hash = hashlib.sha256(id_bytes).hexdigest()
+            i = int(id_hash, 16) % n_clients
+            clients[i].append(flow_id)
+        return clients
 
 app = ServerApp()
 
@@ -243,13 +241,12 @@ def main(grid: Grid, context: Context) -> None:
         clean_metrics = list(all_rounds.values())
 
         daily_metric_logs.append(clean_metrics)
-        clean_metrics = cast(list[dict[str, float]], clean_metrics) # MetricRecord
         recent_metrics = clean_metrics[-server.config.n_aggregate:]
         agg_metrics = server.aggregate_records(recent_metrics)
         previous_roc = agg_metrics['auroc']
         server.log_results(day, clean_metrics, agg_metrics, recovery_metric)
-    print(f"Final Time: {time.time() - start}")
 
+    print(f"Final Time: {time.time() - start}")
     FedMetrics.create_metric_plots(daily_metric_logs, OUTPUT_PATH)
     clear_directory(RUNTIME_PATH)
 
