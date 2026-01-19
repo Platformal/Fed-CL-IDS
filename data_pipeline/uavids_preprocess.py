@@ -2,15 +2,18 @@ from pathlib import Path
 from typing import cast
 import random
 
-from sklearn.preprocessing import RobustScaler
 import pandas as pd
 import yaml
 
 RANDOM_SEED = 0
 UAVIDS_CSV_PATH = Path("datasets/UAVIDS-2025.csv")
-DISTRIBUTION_PATH = Path("data_pipeline/splits/uavids_distribution.yaml")
-UAVIDS_DAYS_PATH = Path("data_pipeline/splits/uavids_days.yaml")
-OUTPUT_DIR_PATH = Path("data_pipeline/preprocessed_uavids")
+DATA_PIPELINE_PATH = Path('data_pipeline')
+SPLITS_DIR_PATH = DATA_PIPELINE_PATH / 'splits'
+DISTRIBUTION_PATH = SPLITS_DIR_PATH / 'uavids_distribution.yaml'
+UAVIDS_DAYS_PATH = SPLITS_DIR_PATH / 'uavids_days.yaml'
+OUTPUT_DIR_PATH = DATA_PIPELINE_PATH / 'preprocessed_uavids'
+
+random.seed(RANDOM_SEED)
 
 def generate_uavids_days() -> None:
     """
@@ -102,22 +105,15 @@ def preprocess_uavids():
         'Blackhole Attack': 4
     }
     initial_df = pd.read_csv(UAVIDS_CSV_PATH)
-    dropped = ['SrcAddr', 'DstAddr', 'Protocol']
-    main_df = initial_df.drop(dropped, axis=1).set_index('FlowID')
-    main_labels = main_df.pop('label')
-    for column in main_df.columns:
-        main_df[column] = RobustScaler().fit_transform(
-            main_df[column]
-            .to_numpy()
-            .reshape((-1, 1))
-        )
-        main_df['label'] = main_labels.map(labels)
-    print(main_df)
+    dropped = ['SrcAddr', 'DstAddr', 'Protocol', 'FlowID']
+    main_df = initial_df.drop(dropped, axis=1)
+    main_df['label'] = main_df['label'].map(labels)
 
     for day, flows in uavids_days.items():
-        day_df = main_df.loc[flows]
+        day_df = main_df.iloc[flows]
         day_df.to_parquet(OUTPUT_DIR_PATH / f"{day}.parquet")
         print(day_df['label'].value_counts() / len(day_df))
+    print(day_df)
 if __name__ == "__main__":
     generate_uavids_days()
     preprocess_uavids()

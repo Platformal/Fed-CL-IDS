@@ -5,7 +5,6 @@ its parameters from the server module.
 """
 from typing import Callable, Iterable, cast
 from collections import OrderedDict
-from dataclasses import dataclass
 from pathlib import Path
 from time import time
 import os
@@ -16,6 +15,7 @@ from flwr.clientapp import ClientApp
 
 from opacus.grad_sample.grad_sample_module import GradSampleModule
 from opacus.optimizers.optimizer import DPOptimizer
+from sklearn.preprocessing import RobustScaler
 from torch.profiler import profile, record_function, ProfilerActivity
 from torch.utils.data import DataLoader, TensorDataset
 from torch import Tensor
@@ -31,45 +31,35 @@ CWD_PATH = Path().cwd()
 RUNTIME_PATH = CWD_PATH / 'runtime'
 TRACE_PATH = RUNTIME_PATH / 'trace.txt'
 
-@dataclass()
-class ClientConfiguration:
-    """Stores configurations from pyproject.toml"""
+class Client:
+    """Acts as an interactive instance of a client."""
+
+    scaler = RobustScaler()
+    criterion = torch.nn.BCEWithLogitsLoss() # Returns tensor on device
+
     def __init__(self, context: Context) -> None:
         device_str = 'cuda' if torch.cuda.is_available() else 'cpu'
         self.device = torch.device(device_str)
         self.epochs = cast(int, context.run_config['epochs'])
         self.batch_size = cast(int, context.run_config['batch-size'])
         self.mu = cast(float, context.run_config['proximal-mu'])
+        self.model: MLP = self._initialize_model(context)
 
-        # Experience replay
-        self.cl_enabled = cast(bool, context.run_config['cl-enabled'])
-        self.er_sample_rate = cast(float, context.run_config['er-memory'])
-        self.er_mix_ratio = cast(float, context.run_config['er-mix-ratio'])
-        self.ewc_lambda = cast(float, context.run_config['ewc-lambda'])
-
-        # Differential privacy
+        self.dp = DifferentialPrivacy()
         self.dp_enabled = cast(bool, context.run_config['dp-enabled'])
         self.clipping = cast(float, context.run_config['clipping'])
         self.noise = cast(float, context.run_config['noise'])
         self.delta = cast(float, context.run_config['delta'])
 
-class Client:
-    """Acts as an interactive instance of a client."""
-    def __init__(self, context: Context) -> None:
-        self.config = ClientConfiguration(context)
-        self.model: MLP = self._initialize_model(context)
-        self.criterion = torch.nn.BCEWithLogitsLoss() # Returns on device
-
-        self.dp = DifferentialPrivacy()
         self.cl = ContinualLearning(
             er_filepath_identifier=os.getpid(), # or Node ID
             er_runtime_directory=RUNTIME_PATH,
-            device=self.config.device
+            device=self.device
         )
-
-        # Data cache (probably will be removed with CIC-IDS)
-        # self.dataframe: pd.DataFrame
-        # self.dataframe_path: Optional[Path] = None
+        self.cl_enabled = cast(bool, context.run_config['cl-enabled'])
+        self.er_sample_rate = cast(float, context.run_config['er-memory'])
+        self.er_mix_ratio = cast(float, context.run_config['er-mix-ratio'])
+        self.ewc_lambda = cast(float, context.run_config['ewc-lambda'])
 
     def _initialize_model(self, context: Context) -> MLP:
         widths = cast(str, context.run_config['mlp-widths'])
@@ -81,21 +71,29 @@ class Client:
             lr_max=cast(float, context.run_config['mlp-lr-max']),
             lr_min=cast(float, context.run_config['mlp-lr-min'])
         )
-        return model.to(self.config.device)
+        return model.to(self.device)
 
     def update_model(self, parameters: dict[str, Tensor]) -> None:
         """Load torch_state_dict into client model and self.server_model."""
         self.model.load_state_dict(parameters)
 
-    def data_from_indices(self, filepath: Path, indices: list[int]):
+    def data_from_indices(
+            self,
+            filepath: Path,
+            indices: list[int]
+    ) -> tuple[Tensor, Tensor]:
+        """
+        Reads from given filepath and returns a tuple of containing the
+        locally scaled features and the labels binarized, e.g. float(bool(label))
+        """
         df = pd.read_parquet(filepath).iloc[indices]
         features, labels = df.drop('label', axis=1), df['label']
-        np_features = features.to_numpy('float32')
+        np_features = Client.scaler.fit_transform(features.to_numpy('float32'))
         np_labels = labels.to_numpy(bool).astype('float32')
 
-        tensor_features = torch.from_numpy(np_features).to(self.config.device)
-        tensor_labels = torch.from_numpy(np_labels).to(self.config.device)
-        return tensor_features, tensor_labels
+        tensor_features = torch.from_numpy(np_features)
+        tensor_labels = torch.from_numpy(np_labels)
+        return tensor_features.to(self.device), tensor_labels.to(self.device)
 
     def train(
             self,
@@ -132,15 +130,15 @@ class Client:
             for param in self.model.parameters()
         ]
         self.model.train()
-        if self.config.cl_enabled:
+        if self.cl_enabled:
             train_set = self.cl.er.sample_replay_buffer(
                 original_dataset=train_set,
                 n_new_samples=len(train_set[1]),
-                ratio_old_samples=self.config.er_mix_ratio
+                ratio_old_samples=self.er_mix_ratio
             )
         data_loader = DataLoader(
             dataset=TensorDataset(*train_set),
-            batch_size=self.config.batch_size,
+            batch_size=self.batch_size,
             shuffle=True
         )
         data_loader = cast(DataLoader[tuple[Tensor, Tensor]], data_loader)
@@ -150,12 +148,12 @@ class Client:
         training_model, optimizer, data_loader = packages
         scheduler = self.model.get_scheduler(
             optimizer=optimizer,
-            cosine_epochs=len(data_loader) * self.config.epochs
+            cosine_epochs=len(data_loader) * self.epochs
         )
 
         total_loss = self._zero_tensor()
         total_samples = 0
-        for _ in range(self.config.epochs):
+        for _ in range(self.epochs):
             loss, n_samples = self._train_iteration(
                 model=training_model,
                 optimizer=optimizer,
@@ -170,18 +168,18 @@ class Client:
         if isinstance(training_model, GradSampleModule):
             self.model = cast(MLP, training_model.to_standard_module())
 
-        if self.config.cl_enabled:
-            self.cl.er.add_data(train_set, self.config.er_sample_rate)
+        if self.cl_enabled:
+            self.cl.er.add_data(train_set, self.er_sample_rate)
             self.cl.ewc.update_fisher_information(
                 model=self.model,
                 train_set=train_set,
-                criterion=self.criterion,
-                batch_size=self.config.batch_size
+                criterion=Client.criterion,
+                batch_size=self.batch_size
             )
             self.cl.ewc.update_prev_parameters(self.model)
         average_loss = total_loss / max(1, total_samples)
         print(f"Training Time: {time() - loop_start:.3f} sec")
-        return average_loss.item(), total_samples // self.config.epochs
+        return average_loss.item(), total_samples // self.epochs
 
     def _train_iteration(
             self,
@@ -201,19 +199,19 @@ class Client:
 
             outputs: Tensor = model(batch_features) # Forward pass
             outputs = outputs.squeeze(1)
-            loss: Tensor = self.criterion(outputs, batch_labels)
+            loss: Tensor = Client.criterion(outputs, batch_labels)
 
             # As the model changes from its gradients,
-            # calculate penalties as it changes parameters
-            if self.config.cl_enabled and not self.cl.ewc.is_empty():
+            # calculate penalties if new params stray too far
+            if self.cl_enabled and not self.cl.ewc.is_empty():
                 batch_fisher_penalty = self.cl.ewc.calculate_penalty(
                     model=model,
-                    ewc_lambda=self.config.ewc_lambda
+                    ewc_lambda=self.ewc_lambda
                 )
                 loss += batch_fisher_penalty
 
             # If FedAvg, ignore, else perform FedProx calculation
-            if self.config.mu:
+            if self.mu:
                 proximal_term = self._calculate_proximal_term(
                     model=model,
                     server_parameters=server_parameters
@@ -242,7 +240,7 @@ class Client:
             difference = client_parameter - server_parameter
             # sum of squared vectors produces the l2 norm
             proximal_term += torch.sum(difference ** 2)
-        return self.config.mu * 0.5 * proximal_term
+        return self.mu * 0.5 * proximal_term
 
     @torch.no_grad()
     def evaluate(
@@ -258,7 +256,7 @@ class Client:
         self.model.eval()
         data_loader = cast(
             DataLoader[tuple[Tensor, Tensor]],
-            DataLoader(TensorDataset(*test_set), self.config.batch_size)
+            DataLoader(TensorDataset(*test_set), self.batch_size)
         )
         packages = self._create_model_packages(data_loader)
         evaluation_model, _, data_loader = packages
@@ -284,7 +282,7 @@ class Client:
 
             n_batch_correct = (batch_predictions == batch_labels).sum()
             n_correct += n_batch_correct
-            batch_loss: Tensor = self.criterion(outputs, batch_labels)
+            batch_loss: Tensor = Client.criterion(outputs, batch_labels)
             total_loss += batch_loss * len(batch_labels)
             total_samples += len(batch_labels)
 
@@ -330,16 +328,17 @@ class Client:
         Return new private wrappers around original objects if
         differential privacy is enabled.
         """
-        if not self.config.dp_enabled:
+        if not self.dp_enabled:
             return self.model, self.model.get_optimizer(), data_loader
+        # Needs to be in train for make_private()
         if is_evaluating := not self.model.training:
             self.model.train()
         dp_model, dp_optimizer, *_, dp_data_loader = self.dp.make_private(
             module=self.model,
             optimizer=self.model.get_optimizer(),
             data_loader=data_loader,
-            noise_multiplier=self.config.noise,
-            max_grad_norm=self.config.clipping # Clipping value
+            noise_multiplier=self.noise,
+            max_grad_norm=self.clipping # Clipping value
         )
         if is_evaluating:
             dp_model.eval()
@@ -347,7 +346,7 @@ class Client:
 
     def _zero_tensor(self) -> Tensor:
         """Using tensor variables to reduce Tensor.item() sync overhead."""
-        return torch.tensor(0.0, dtype=torch.float32, device=self.config.device)
+        return torch.tensor(0.0, dtype=torch.float32, device=self.device)
 
 
 def _assign_client(function: Callable) -> Callable:
@@ -375,7 +374,7 @@ def client_train(client: Client, msg: Message) -> Message:
     average_loss, n_samples = client.train(train_set, server_parameters, profile_on)
     metrics = {
         'train_loss': average_loss,
-        'epsilon': client.dp.get_epsilon(client.config.delta),
+        'epsilon': client.dp.get_epsilon(client.delta),
         'num-examples': n_samples
     }
     # state_dict() detaches from grad, but still on cuda
