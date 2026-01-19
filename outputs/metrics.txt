@@ -384,3 +384,9 @@ Day 2 | 5/10 train | Rounds: 60 | Day Epsilon: 34.570023, Total Epsilon: 112.983
 Day 3 | 5/10 train | Rounds: 60 | Day Epsilon: 28.260818, Total Epsilon: 141.2446 | Recovery Time (sec): 73.647, Recovery Rounds: 10 | {'accuracy': 0.926766, 'loss': 0.39594, 'auroc': 0.986849, 'auprc': 0.990397, 'macro-f1': 0.926336, 'recall@fpr=1%': 0.89665, 'epsilon': 0.471014}
 Day 4 | 5/10 train | Rounds: 60 | Day Epsilon: 23.87546, Total Epsilon: 165.120059 | Recovery Time (sec): 81.308, Recovery Rounds: 10 | {'accuracy': 0.896111, 'loss': 0.505354, 'auroc': 0.987631, 'auprc': 0.992937, 'macro-f1': 0.894813, 'recall@fpr=1%': 0.860653, 'epsilon': 0.397924}
 
+File per Day & Deduplication @ 80 Rounds:
+Day 1 | 5/10 train | Rounds: 80 | Day Epsilon: 148.557364, Total Epsilon: 148.557364 | Recovery Time (sec): None, Recovery Rounds: None | {'accuracy': 0.861497, 'loss': 0.675759, 'auroc': 0.968325, 'auprc': 0.93673, 'macro-f1': 0.767652, 'recall@fpr=1%': 0.612486, 'epsilon': 1.342606}
+Day 2 | 5/10 train | Rounds: 80 | Day Epsilon: 104.833391, Total Epsilon: 253.390755 | Recovery Time (sec): 20.663, Recovery Rounds: 10 | {'accuracy': 0.868491, 'loss': 0.611095, 'auroc': 0.976287, 'auprc': 0.972642, 'macro-f1': 0.851442, 'recall@fpr=1%': 0.765463, 'epsilon': 1.295602}
+Day 3 | 5/10 train | Rounds: 80 | Day Epsilon: 91.357014, Total Epsilon: 344.747769 | Recovery Time (sec): 24.411, Recovery Rounds: 10 | {'accuracy': 0.872261, 'loss': 0.598893, 'auroc': 0.979171, 'auprc': 0.984873, 'macro-f1': 0.871366, 'recall@fpr=1%': 0.767553, 'epsilon': 1.141879}
+Day 4 | 5/10 train | Rounds: 80 | Day Epsilon: 94.198761, Total Epsilon: 438.94653 | Recovery Time (sec): 23.157, Recovery Rounds: 10 | {'accuracy': 0.865396, 'loss': 0.56026, 'auroc': 0.983043, 'auprc': 0.992676, 'macro-f1': 0.852583, 'recall@fpr=1%': 0.787115, 'epsilon': 1.033896}
+

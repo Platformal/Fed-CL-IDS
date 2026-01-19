@@ -8,7 +8,6 @@ import time
 import pandas as pd
 from torch import Tensor
 import torch
-import yaml
 
 from flwr.app import ArrayRecord, ConfigRecord, Context, MetricRecord
 from flwr.serverapp import Grid, ServerApp
@@ -19,8 +18,7 @@ from models.fed_metrics import FedMetrics
 from models.mlp import MLP
 
 MAIN_PATH = Path().cwd()
-UAVIDS_DAYS_PATH = MAIN_PATH / 'data_pipeline' / 'splits' / 'uavids_days.yaml'
-UAVIDS_DATA_PATH = MAIN_PATH / 'datasets' / 'UAVIDS-2025 Preprocessed.csv'
+UAVIDS_DATA_PATH = MAIN_PATH / 'data_pipeline' / 'preprocessed_uavids'
 RUNTIME_PATH = MAIN_PATH / 'runtime'
 OUTPUT_PATH = MAIN_PATH / 'outputs'
 METRICS_PATH = OUTPUT_PATH / 'metrics.txt'
@@ -133,27 +131,16 @@ class Server:
             new_dict[key] = value
         return new_dict
 
-    def get_uavids(self, filepath: Path) -> dict[int, list[int]]:
-        """Opens form yaml file, and filters days from configuration file."""
-        with filepath.open(encoding='utf-8') as file:
-            raw_days = cast(dict[int, list[int]], yaml.safe_load(file))
-        filtered_days = {
-            i: raw_days[i]
-            for i in range(1, self.config.n_days + 1)
-        }
-        return filtered_days
-
-    def get_data_flows(
+    def get_data(
             self,
-            raw_flows: list[int]
+            filepath: Path
     ) -> tuple[list[ConfigRecord], list[ConfigRecord]]:
         """Splits flows into train and evaluate and distributes them among
         n_clients for each respective flow"""
+        if not filepath.exists():
+            raise FileNotFoundError(f"Cannot find file name: {filepath}")
         # 80/20 split
-        train_split, eval_split = self._split_data(
-            raw_flows=raw_flows,
-            csv_path=UAVIDS_DATA_PATH
-        )
+        train_split, eval_split = self._split_data(pd.read_parquet(filepath))
         # Train flows (80%) gets hashed into 5 clients (train_pf = 0.5)
         # Evaluate flows (20%) gets hashed into 10 clients (evaluate_pf = 1.0)
         train_tasks, eval_tasks = map(
@@ -162,38 +149,25 @@ class Server:
             (self.config.n_train_clients, self.config.n_evaluate_clients)
         )
         train_records = [
-            ConfigRecord({'flows': train_flows})
+            ConfigRecord({'flows': train_flows, 'filepath': str(filepath)})
             for train_flows in train_tasks
         ]
         eval_records = [
-            ConfigRecord({'flows': eval_flows})
+            ConfigRecord({'flows': eval_flows, 'filepath': str(filepath)})
             for eval_flows in eval_tasks
         ]
         return train_records, eval_records
 
     def _split_data(
             self,
-            raw_flows: list[int],
+            dataframe: pd.DataFrame,
             train_ratio: float = 0.8,
-            random_seed: Optional[int] = None,
-            csv_path: Optional[Path] = None
+            random_seed: Optional[int] = None
     ) -> tuple[list[int], list[int]]:
-        """
-        Splits a list of flow IDs into two datasets.
-        Can optionally be stratified by passing in csv filepath.
-        """
-        labels: Optional[pd.Series] = None
-        if csv_path:
-            if self.dataframe_path is None or self.dataframe_path != csv_path:
-                self.dataframe_path = csv_path
-                self.dataframe = pd.read_csv(
-                    filepath_or_buffer=csv_path,
-                    dtype={'label': 'uint8'},
-                    index_col='FlowID'
-                )
-            labels = self.dataframe.loc[raw_flows]['label']
+        """Splits a list of flow IDs into two datasets."""
+        labels = dataframe['label']
         splits = train_test_split(
-            raw_flows,
+            list(range(len(dataframe))),
             train_size=train_ratio,
             random_state=random_seed,
             stratify=labels
@@ -215,18 +189,22 @@ app = ServerApp()
 @app.main()
 def main(grid: Grid, context: Context) -> None:
     """Triggered when flwr run is called."""
+    server = Server(grid, context)
     if RUNTIME_PATH.exists():
         clear_directory(RUNTIME_PATH)
     else:
         RUNTIME_PATH.mkdir()
 
-    server = Server(grid, context)
     daily_metric_logs: list[list[MetricRecord]] = []
     previous_roc: Optional[float] = None
+    mapped_filepath = {
+        day: UAVIDS_DATA_PATH / f"{day}.parquet"
+        for day in range(1, server.config.n_days + 1)
+    }
 
     start = time.time()
-    for day, raw_flows in server.get_uavids(UAVIDS_DAYS_PATH).items():
-        train_flows, evaluate_flows = server.get_data_flows(raw_flows)
+    for day, filepath in mapped_filepath.items():
+        train_flows, evaluate_flows = server.get_data(filepath)
         daily_result = server.federated_model.start(
             initial_arrays=ArrayRecord(server.current_parameters),
             current_day=day,

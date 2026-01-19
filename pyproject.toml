@@ -41,7 +41,7 @@ fraction-evaluate = 1.0
 resample-nodes = false
 days = 4
 epochs = 2
-rounds = 60
+rounds = 80
 # How many recent metrics to aggregate after each day
 # Also used for how many to aggregate and compare for recovery time (FedAvg)
 n-aggregations = 10

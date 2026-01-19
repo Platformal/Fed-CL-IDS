@@ -3,7 +3,7 @@ Representation of a client/supernode in a federated framework.
 Performs both training and evaluation with a local pytorch MLP module that gets
 its parameters from the server module.
 """
-from typing import Callable, Optional, Iterable, cast
+from typing import Callable, Iterable, cast
 from collections import OrderedDict
 from dataclasses import dataclass
 from pathlib import Path
@@ -27,9 +27,8 @@ from fed.continual_learning import ContinualLearning
 from models.mlp import MLP, Adam, CosineAnnealingLR
 from models.fed_metrics import FedMetrics
 
-MAIN_PATH = Path().cwd()
-DATAFRAME_PATH = MAIN_PATH / 'datasets' / 'UAVIDS-2025 Preprocessed.csv'
-RUNTIME_PATH = MAIN_PATH / 'runtime'
+CWD_PATH = Path().cwd()
+RUNTIME_PATH = CWD_PATH / 'runtime'
 TRACE_PATH = RUNTIME_PATH / 'trace.txt'
 
 @dataclass()
@@ -69,8 +68,8 @@ class Client:
         )
 
         # Data cache (probably will be removed with CIC-IDS)
-        self.dataframe: pd.DataFrame
-        self.dataframe_path: Optional[Path] = None
+        # self.dataframe: pd.DataFrame
+        # self.dataframe_path: Optional[Path] = None
 
     def _initialize_model(self, context: Context) -> MLP:
         widths = cast(str, context.run_config['mlp-widths'])
@@ -85,32 +84,12 @@ class Client:
         return model.to(self.config.device)
 
     def update_model(self, parameters: dict[str, Tensor]) -> None:
-        """
-        Load torch_state_dict into client model and self.server_model.
-        """
+        """Load torch_state_dict into client model and self.server_model."""
         self.model.load_state_dict(parameters)
 
-    def set_dataframe(self, csv_path: Path) -> None:
-        """Load and cache self.dataframe for faster reuse if same csv file."""
-        if self.dataframe_path is None or self.dataframe_path != csv_path:
-            self.dataframe = pd.read_csv(csv_path, index_col='FlowID')
-            self.dataframe_path = csv_path
-
-    def get_flow_data(self, flow_ids: list[int]) -> tuple[Tensor, Tensor]:
-        """
-        Transforms csv table of features and label into
-        tensors on self.config.device.
-
-        Assumes label column is called 'label'.
-        
-        Binarizes multiclass labels. So preprocessed benign/normal traffic 
-        should always be zero and malicious traffic should be a non-zero 
-        integer label.
-        """
-        if not hasattr(self, 'dataframe'):
-            raise ValueError("Dataframe was not initialized")
-        filtered = self.dataframe.loc[flow_ids]
-        features, labels = filtered.drop('label', axis=1), filtered['label']
+    def data_from_indices(self, filepath: Path, indices: list[int]):
+        df = pd.read_parquet(filepath).iloc[indices]
+        features, labels = df.drop('label', axis=1), df['label']
         np_features = features.to_numpy('float32')
         np_labels = labels.to_numpy(bool).astype('float32')
 
@@ -390,9 +369,9 @@ def client_train(client: Client, msg: Message) -> Message:
     profile_on = 'profile_on' in msg.content['config']
     server_arrays = cast(ArrayRecord, msg.content['arrays'])
     server_parameters = server_arrays.to_torch_state_dict()
-    client.set_dataframe(DATAFRAME_PATH)
-    flow_ids = cast(list[int], msg.content['config']['flows'])
-    train_set = client.get_flow_data(flow_ids)
+    filepath = Path(cast(str, msg.content['config']['filepath']))
+    row_indices = cast(list[int], msg.content['config']['flows'])
+    train_set = client.data_from_indices(filepath, row_indices)
     average_loss, n_samples = client.train(train_set, server_parameters, profile_on)
     metrics = {
         'train_loss': average_loss,
@@ -416,9 +395,9 @@ def client_evaluate(client: Client, msg: Message) -> Message:
     """
     server_arrays = cast(ArrayRecord, msg.content['arrays'])
     server_parameters = server_arrays.to_torch_state_dict()
-    client.set_dataframe(DATAFRAME_PATH)
-    flow_ids: list[int] = cast(list[int], msg.content['config']['flows'])
-    test_set = client.get_flow_data(flow_ids)
+    filepath = Path(cast(str, msg.content['config']['filepath']))
+    row_indices: list[int] = cast(list[int], msg.content['config']['flows'])
+    test_set = client.data_from_indices(filepath, row_indices)
 
     eval_metrics, n_samples = cast(
         tuple[dict[str, MetricRecordValues], int],

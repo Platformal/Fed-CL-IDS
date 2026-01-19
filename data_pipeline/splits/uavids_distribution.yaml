@@ -1,14 +1,44 @@
+# Original Distribution
+# 1:
+#   Normal Traffic: 0.85
+#   Blackhole Attack: 0.05
+#   Flooding Attack: 0.05
+#   Sybil Attack: 0.00
+#   Wormhole Attack: 0.05
+
+# 2:
+#   Normal Traffic: 0.60
+#   Blackhole Attack: 0.10
+#   Flooding Attack: 0.20
+#   Sybil Attack: 0.05
+#   Wormhole Attack: 0.05
+
+# 3:
+#   Normal Traffic: 0.50
+#   Blackhole Attack: 0.10
+#   Flooding Attack: 0.10
+#   Sybil Attack: 0.20
+#   Wormhole Attack: 0.10
+
+# 4:
+#   Normal Traffic: 0.40
+#   Blackhole Attack: 0.15
+#   Flooding Attack: 0.10
+#   Sybil Attack: 0.15
+#   Wormhole Attack: 0.20
+
+# Distribution (2026.01.18)
 1:
-  Normal Traffic: 0.85
-  Blackhole Attack: 0.05
-  Flooding Attack: 0.05
-  Sybil Attack: 0.00
-  Wormhole Attack: 0.05
+  Normal Traffic: 0.90
+  Blackhole Attack: 0.03
+  Flooding Attack: 0.04
+  Sybil Attack: 0.01
+  Wormhole Attack: 0.02
 
 2:
-  Normal Traffic: 0.60
-  Blackhole Attack: 0.10
-  Flooding Attack: 0.20
+  Normal Traffic: 0.70
+  Blackhole Attack: 0.08
+  Flooding Attack: 0.12
   Sybil Attack: 0.05
   Wormhole Attack: 0.05
 
@@ -20,8 +50,8 @@
   Wormhole Attack: 0.10
 
 4:
-  Normal Traffic: 0.40
+  Normal Traffic: 0.33
   Blackhole Attack: 0.15
-  Flooding Attack: 0.10
-  Sybil Attack: 0.15
-  Wormhole Attack: 0.20
+  Flooding Attack: 0.15
+  Sybil Attack: 0.22
+  Wormhole Attack: 0.15
