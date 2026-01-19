@@ -3,7 +3,7 @@ Representation of a client/supernode in a federated framework.
 Performs both training and evaluation with a local pytorch MLP module that gets
 its parameters from the server module.
 """
-from typing import Callable, Optional, cast
+from typing import Callable, Optional, Iterable, cast
 from collections import OrderedDict
 from dataclasses import dataclass
 from pathlib import Path
@@ -40,6 +40,7 @@ class ClientConfiguration:
         self.device = torch.device(device_str)
         self.epochs = cast(int, context.run_config['epochs'])
         self.batch_size = cast(int, context.run_config['batch-size'])
+        self.mu = cast(float, context.run_config['proximal-mu'])
 
         # Experience replay
         self.cl_enabled = cast(bool, context.run_config['cl-enabled'])
@@ -85,9 +86,7 @@ class Client:
 
     def update_model(self, parameters: dict[str, Tensor]) -> None:
         """
-        Load a given MLP module's parameters into client's model.
-        Automatically moves parameters to device the MLP model is on.
-        Equivalent to using mlp.load_state_dict().
+        Load torch_state_dict into client model and self.server_model.
         """
         self.model.load_state_dict(parameters)
 
@@ -119,7 +118,12 @@ class Client:
         tensor_labels = torch.from_numpy(np_labels).to(self.config.device)
         return tensor_features, tensor_labels
 
-    def train(self, train_set: tuple[Tensor, Tensor], profile_on: bool) -> tuple[float, int]:
+    def train(
+            self,
+            train_set: tuple[Tensor, Tensor],
+            server_state_dict: OrderedDict[str, Tensor],
+            profile_on: bool
+    ) -> tuple[float, int]:
         """
         Trains local model modified by the toml configuration file 
         (such as continual learning and differential privacy), 
@@ -129,16 +133,25 @@ class Client:
         if profile_on:
             activities = [ProfilerActivity.CPU, ProfilerActivity.CUDA]
             with profile(activities=activities, profile_memory=True) as prof:
-                result = self._train(train_set)
+                result = self._train(train_set, server_state_dict)
             TRACE_PATH.write_text(
                 prof.key_averages().table(sort_by='cpu_time_total')
             )
         else:
-            result = self._train(train_set)
+            result = self._train(train_set, server_state_dict)
         return result
 
-    def _train(self, train_set: tuple[Tensor, Tensor]) -> tuple[float, int]:
+    def _train(
+            self,
+            train_set: tuple[Tensor, Tensor],
+            server_state_dict: OrderedDict[str, Tensor]
+    ) -> tuple[float, int]:
         loop_start = time()
+        self.update_model(server_state_dict)
+        server_parameters = [
+            param.detach().clone()
+            for param in self.model.parameters()
+        ]
         self.model.train()
         if self.config.cl_enabled:
             train_set = self.cl.er.sample_replay_buffer(
@@ -146,7 +159,6 @@ class Client:
                 n_new_samples=len(train_set[1]),
                 ratio_old_samples=self.config.er_mix_ratio
             )
-
         data_loader = DataLoader(
             dataset=TensorDataset(*train_set),
             batch_size=self.config.batch_size,
@@ -169,11 +181,13 @@ class Client:
                 model=training_model,
                 optimizer=optimizer,
                 scheduler=scheduler,
-                data_loader=data_loader
+                data_loader=data_loader,
+                server_parameters=server_parameters
             )
             total_loss += loss
             total_samples += n_samples
 
+        # Unwrap if dp enabled
         if isinstance(training_model, GradSampleModule):
             self.model = cast(MLP, training_model.to_standard_module())
 
@@ -196,6 +210,7 @@ class Client:
             optimizer: Adam | DPOptimizer,
             scheduler: CosineAnnealingLR,
             data_loader: DataLoader[tuple[Tensor, Tensor]],
+            server_parameters: Iterable[Tensor]
     ) -> tuple[Tensor, int]:
         n_samples = 0
         iteration_loss = self._zero_tensor()
@@ -218,6 +233,14 @@ class Client:
                 )
                 loss += batch_fisher_penalty
 
+            # If FedAvg, ignore, else perform FedProx calculation
+            if self.config.mu:
+                proximal_term = self._calculate_proximal_term(
+                    model=model,
+                    server_parameters=server_parameters
+                )
+                loss += proximal_term
+
             optimizer.zero_grad() # Prevents gradient accumulation
             loss.backward() # Calculate where to step using mini-batch SGD
             optimizer.step() # Step forward down gradient
@@ -228,9 +251,31 @@ class Client:
             iteration_loss += loss.detach() * batch_size
         return iteration_loss, n_samples
 
+    def _calculate_proximal_term(
+            self,
+            model: MLP | GradSampleModule,
+            server_parameters: Iterable[Tensor]
+    ) -> Tensor:
+        # (mu / 2) * sum(||local - global||^2)
+        proximal_term = self._zero_tensor()
+        parameter_pairs = zip(model.parameters(), server_parameters)
+        for client_parameter, server_parameter in parameter_pairs:
+            difference = client_parameter - server_parameter
+            # sum of squared vectors produces the l2 norm
+            proximal_term += torch.sum(difference ** 2)
+        return self.config.mu * 0.5 * proximal_term
+
     @torch.no_grad()
-    def evaluate(self, test_set: tuple[Tensor, Tensor]) -> tuple[dict[str, float], int]:
-        """Evaluates server aggregated model against the test set."""
+    def evaluate(
+        self,
+        test_set: tuple[Tensor, Tensor],
+        server_parameters: OrderedDict[str, Tensor]
+    ) -> tuple[dict[str, float], int]:
+        """
+        Loads server model and evaluates server aggregated model
+        against the test set.
+        """
+        self.update_model(server_parameters)
         self.model.eval()
         data_loader = cast(
             DataLoader[tuple[Tensor, Tensor]],
@@ -239,9 +284,11 @@ class Client:
         packages = self._create_model_packages(data_loader)
         evaluation_model, _, data_loader = packages
 
-        labels_list: list[Tensor] =  []
-        predictions_list: list[Tensor] = []
-        probabilities_list: list[Tensor] = []
+        data: dict[str, list[Tensor]] = {
+            'labels': [],
+            'predictions': [],
+            'probabilities': []
+        }
         n_correct = self._zero_tensor()
         total_loss = self._zero_tensor()
         total_samples = 0
@@ -262,21 +309,21 @@ class Client:
             total_loss += batch_loss * len(batch_labels)
             total_samples += len(batch_labels)
 
-            labels_list.append(batch_labels)
-            predictions_list.append(batch_predictions)
-            probabilities_list.append(batch_probabilities)
+            data['labels'].append(batch_labels)
+            data['predictions'].append(batch_predictions)
+            data['probabilities'].append(batch_probabilities)
 
         if isinstance(evaluation_model, GradSampleModule):
             self.model = cast(MLP, evaluation_model.to_standard_module())
 
-        metrics = {
+        metrics: dict[str, float] = {
             'accuracy': (n_correct / total_samples).item(),
             'loss': (total_loss / total_samples).item(),
         }
         fed_metrics = self._create_metrics(
-            labels=torch.cat(labels_list).cpu(),
-            predictions=torch.cat(predictions_list).cpu(),
-            probabilities=torch.cat(probabilities_list).cpu()
+            labels=torch.cat(data['labels']).cpu(),
+            predictions=torch.cat(data['predictions']).cpu(),
+            probabilities=torch.cat(data['probabilities']).cpu()
         )
         metrics.update(fed_metrics)
         return metrics, total_samples
@@ -343,18 +390,17 @@ def client_train(client: Client, msg: Message) -> Message:
     profile_on = 'profile_on' in msg.content['config']
     server_arrays = cast(ArrayRecord, msg.content['arrays'])
     server_parameters = server_arrays.to_torch_state_dict()
-    client.update_model(server_parameters)
     client.set_dataframe(DATAFRAME_PATH)
     flow_ids = cast(list[int], msg.content['config']['flows'])
     train_set = client.get_flow_data(flow_ids)
-    average_loss, n_samples = client.train(train_set, profile_on)
-    # state_dict() detaches from grad, but still on cuda
-    client_parameters = cast(OrderedDict, client.model.state_dict())
+    average_loss, n_samples = client.train(train_set, server_parameters, profile_on)
     metrics = {
         'train_loss': average_loss,
         'epsilon': client.dp.get_epsilon(client.config.delta),
         'num-examples': n_samples
     }
+    # state_dict() detaches from grad, but still on cuda
+    client_parameters = cast(OrderedDict, client.model.state_dict())
     content = RecordDict({
         'arrays': ArrayRecord(client_parameters),
         'metrics': MetricRecord(metrics)
@@ -370,14 +416,13 @@ def client_evaluate(client: Client, msg: Message) -> Message:
     """
     server_arrays = cast(ArrayRecord, msg.content['arrays'])
     server_parameters = server_arrays.to_torch_state_dict()
-    client.update_model(server_parameters)
     client.set_dataframe(DATAFRAME_PATH)
     flow_ids: list[int] = cast(list[int], msg.content['config']['flows'])
     test_set = client.get_flow_data(flow_ids)
 
     eval_metrics, n_samples = cast(
         tuple[dict[str, MetricRecordValues], int],
-        client.evaluate(test_set)
+        client.evaluate(test_set, server_parameters)
     )
     eval_metrics['num-examples'] = n_samples
     content = RecordDict({'metrics': MetricRecord(eval_metrics)})

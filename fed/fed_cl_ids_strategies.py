@@ -16,7 +16,7 @@ from flwr.server import Grid
 from torch import Tensor
 import torch
 
-class FedCLIDSAvg(FedAvg):
+class FedCLIDSModel(FedAvg):
     def __init__(
             self,
             grid: Grid,
@@ -53,7 +53,7 @@ class FedCLIDSAvg(FedAvg):
             message_type=MessageType.TRAIN,
             configs=configs
         )
-        messages[0].content['config']['profile_on'] = 1
+        messages[0].content[self.configrecord_key]['profile_on'] = 1
         return messages
 
     def configure_evaluate(
@@ -85,14 +85,14 @@ class FedCLIDSAvg(FedAvg):
         if not resample_nodes and (self.train_nodes or self.evaluate_nodes):
             return
         n_all_nodes = len(self.all_nodes)
-        if self.fraction_evaluate > 0.0:
+        if self.fraction_evaluate:
             n_train = int(self.fraction_train * n_all_nodes)
             self.train_nodes, _ = sample_nodes(
                 grid=self.grid,
                 min_available_nodes=self.min_available_nodes,
                 sample_size=max(n_train, self.min_train_nodes)
             )
-        if self.fraction_evaluate > 0.0:
+        if self.fraction_evaluate:
             n_evaluate = int(self.fraction_evaluate * n_all_nodes)
             self.evaluate_nodes, _ = sample_nodes(
                 grid=self.grid,
@@ -171,7 +171,6 @@ class FedCLIDSAvg(FedAvg):
 
         self.sample_nodes(cast(bool, self.context.run_config['resample-nodes']))
 
-        # Initialize if None
         train_config = train_config or [
             ConfigRecord()
             for _ in range(len(self.train_nodes))
@@ -243,10 +242,12 @@ class FedCLIDSAvg(FedAvg):
                     for key, value in agg_evaluate_metrics.items()
                 }
                 log(INFO, "\t└──> Aggregated MetricRecord: %s", rounded_metrics)
+
                 eval_metrics = result.evaluate_metrics_clientapp
                 epsilon = cast(MetricRecord, agg_train_metrics)['epsilon']
                 agg_evaluate_metrics['epsilon'] = epsilon
                 eval_metrics[current_round] = agg_evaluate_metrics
+
                 # current_round acts as the right pointer of the window,
                 # left pointer will shrink (and remove itself)
                 if eval_metrics[-1]['recovery-round'] == -1 and current_day > 1:

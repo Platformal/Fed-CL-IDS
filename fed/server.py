@@ -14,7 +14,7 @@ from flwr.app import ArrayRecord, ConfigRecord, Context, MetricRecord
 from flwr.serverapp import Grid, ServerApp
 
 from sklearn.model_selection import train_test_split
-from fed.fed_cl_ids_strategies import FedCLIDSAvg
+from fed.fed_cl_ids_strategies import FedCLIDSModel
 from models.fed_metrics import FedMetrics
 from models.mlp import MLP
 
@@ -44,7 +44,7 @@ class Server:
     and federated aggregation method."""
     def __init__(self, grid: Grid, context: Context) -> None:
         self.config = ServerConfiguration(grid, context)
-        self.federated_model = FedCLIDSAvg(
+        self.federated_model = FedCLIDSModel(
             grid=grid,
             context=context,
             num_rounds=self.config.n_rounds,
@@ -162,12 +162,12 @@ class Server:
             (self.config.n_train_clients, self.config.n_evaluate_clients)
         )
         train_records = [
-            ConfigRecord({'flows': client_flows})
-            for client_flows in train_tasks
+            ConfigRecord({'flows': train_flows})
+            for train_flows in train_tasks
         ]
         eval_records = [
-            ConfigRecord({'flows': client_flows})
-            for client_flows in eval_tasks
+            ConfigRecord({'flows': eval_flows})
+            for eval_flows in eval_tasks
         ]
         return train_records, eval_records
 
@@ -246,7 +246,7 @@ def main(grid: Grid, context: Context) -> None:
         previous_roc = agg_metrics['auroc']
         server.log_results(day, clean_metrics, agg_metrics, recovery_metric)
 
-    print(f"Final Time: {time.time() - start}")
+    print(f"Final Time: {time.time() - start:.3f}")
     FedMetrics.create_metric_plots(daily_metric_logs, OUTPUT_PATH)
     clear_directory(RUNTIME_PATH)
 

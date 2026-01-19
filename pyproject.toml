@@ -46,6 +46,7 @@ rounds = 60
 # Also used for how many to aggregate and compare for recovery time (FedAvg)
 n-aggregations = 10
 batch-size = 128
+proximal-mu = 0.0
 
 mlp-widths = "256,256,128,64"
 mlp-dropout = 0.2
