@@ -1,11 +1,9 @@
 from pathlib import Path
-from typing import cast
-import random
-
 import pandas as pd
 import numpy as np
 
 THURSDAY_AFTERNOON_PATH = Path("datasets/CIC-IDS2017/Thursday-WorkingHours-Afternoon-Infilteration.pcap_ISCX.csv")
+THURSDAY_WORKING_PATH = Path("datasets/CIC-IDS2017/Tuesday-WorkingHours.pcap_ISCX.csv")
 DIRECTORY = Path("datasets/CIC-IDS2017")
 
 pd.set_option('display.max_columns', None)
@@ -57,10 +55,8 @@ def preprocess() -> None:
     df = df.astype('float32')
 
     # print(df.describe())
-    # Index included?
     # df.to_csv("data_pipeline/preprocessed_cicids/1.csv")
     df.to_parquet("data_pipeline/preprocessed_cicids/1.parquet")
 
 if __name__ == '__main__':
-    # preprocess()
-    print(pd.read_parquet("data_pipeline/preprocessed_cicids/1.parquet"))
+    preprocess()

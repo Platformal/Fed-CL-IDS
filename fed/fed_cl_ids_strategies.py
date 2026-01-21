@@ -163,6 +163,11 @@ class FedCLIDSModel(FedAvg):
             if not math.isnan(cast(float, metric_record['auroc'])):
                 valid_aurocs.append(record_dict)
 
+        # print([
+        #     next(iter(record.metric_records.values()))['auroc']
+        #     for record in reply_contents
+        # ])
+
         if valid_aurocs:
             non_nan_metrics = aggregate_metricrecords(
                 records=valid_aurocs,
