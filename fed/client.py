@@ -27,8 +27,7 @@ from fed.continual_learning import ContinualLearning
 from models.mlp import MLP, Adam, CosineAnnealingLR
 from models.fed_metrics import FedMetrics
 
-CWD_PATH = Path().cwd()
-RUNTIME_PATH = CWD_PATH / 'runtime'
+RUNTIME_PATH = Path('runtime')
 TRACE_PATH = RUNTIME_PATH / 'trace.txt'
 
 class Client:
@@ -84,7 +83,7 @@ class Client:
     ) -> tuple[Tensor, Tensor]:
         """
         Reads from given filepath and returns a tuple of containing the
-        locally scaled features and the labels binarized, e.g. float(bool(label))
+        locally scaled features and the labels binarized, i.e. float(bool(label))
         """
         df = pd.read_parquet(filepath).iloc[indices]
         features, labels = df.drop('label', axis=1), df['label']

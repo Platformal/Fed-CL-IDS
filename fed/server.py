@@ -17,10 +17,11 @@ from fed.fed_cl_ids_strategies import FedCLIDSModel
 from models.fed_metrics import FedMetrics
 from models.mlp import MLP
 
-MAIN_PATH = Path().cwd()
-UAVIDS_DATA_PATH = MAIN_PATH / 'data_pipeline' / 'preprocessed_uavids'
-RUNTIME_PATH = MAIN_PATH / 'runtime'
-OUTPUT_PATH = MAIN_PATH / 'outputs'
+DATA_PIPELINE = Path('data_pipeline')
+UAVIDS_DATA_PATH = DATA_PIPELINE / 'preprocessed_uavids'
+CICIDS_DATA_PATH = DATA_PIPELINE / 'preprocessed_cicids'
+RUNTIME_PATH = Path('runtime')
+OUTPUT_PATH = Path('outputs')
 METRICS_PATH = OUTPUT_PATH / 'metrics.txt'
 
 class ServerConfiguration:
@@ -198,7 +199,7 @@ def main(grid: Grid, context: Context) -> None:
     daily_metric_logs: list[list[MetricRecord]] = []
     previous_roc: Optional[float] = None
     mapped_filepath = {
-        day: UAVIDS_DATA_PATH / f"{day}.parquet"
+        day: CICIDS_DATA_PATH / f"{day}.parquet"
         for day in range(1, server.config.n_days + 1)
     }
 

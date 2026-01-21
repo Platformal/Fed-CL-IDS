@@ -7,7 +7,7 @@ __pycache__
 # Fed-Cl-IDS
 !data_pipeline
 !data_pipeline/**
-data_pipeline/preprocessed_uavids
+data_pipeline/preprocessed_*
 
 !fed
 !fed/*.py

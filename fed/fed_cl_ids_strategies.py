@@ -3,6 +3,7 @@ from collections import OrderedDict
 from logging import INFO
 from io import StringIO
 import time
+import math
 
 from flwr.common import (
     ArrayRecord, ConfigRecord, MetricRecord,
@@ -38,7 +39,7 @@ class FedCLIDSModel(FedAvg):
     def configure_train(
             self,
             arrays: ArrayRecord,
-            configs: list[ConfigRecord],
+            configs: Iterable[ConfigRecord],
     ) -> list[Message]:
         """Configure the next round of federated training"""
         if self.fraction_train == 0.0:
@@ -105,7 +106,7 @@ class FedCLIDSModel(FedAvg):
             arrays: ArrayRecord,
             node_ids: list[int],
             message_type: str,
-            configs: list[ConfigRecord]
+            configs: Iterable[ConfigRecord]
     ) -> list[Message]:
         """Construct N Messages carrying the different RecordDict payloads."""
         messages: list[Message] = []
@@ -149,7 +150,27 @@ class FedCLIDSModel(FedAvg):
         if not valid_replies:
             return None
         reply_contents = [msg.content for msg in valid_replies]
-        return aggregate_metricrecords(reply_contents, self.weighted_by_key)
+        main_metrics = aggregate_metricrecords(
+            records=reply_contents,
+            weight_key=self.weighted_by_key
+        )
+
+        # If NaN in auroc/recall@fpr=1, then filter and reaggregate
+        # to get the correct weighted average
+        valid_aurocs: list[RecordDict] = []
+        for record_dict in reply_contents:
+            metric_record = next(iter(record_dict.metric_records.values()))
+            if not math.isnan(cast(float, metric_record['auroc'])):
+                valid_aurocs.append(record_dict)
+
+        if valid_aurocs:
+            non_nan_metrics = aggregate_metricrecords(
+                records=valid_aurocs,
+                weight_key=self.weighted_by_key
+            )
+            main_metrics['auroc'] = non_nan_metrics['auroc']
+            main_metrics['recall@fpr=1%'] = non_nan_metrics['recall@fpr=1%']
+        return main_metrics
 
     def start(
         self,
@@ -285,7 +306,6 @@ def aggregate_metricrecords(
     for Fed-CL-IDS.
     """
     metric_records = [
-        # Get the first (and only) MetricRecord in the record
         next(iter(record.metric_records.values()))
         for record in records
     ]
@@ -294,10 +314,9 @@ def aggregate_metricrecords(
         for metric_dict in metric_records
     ]
     total_weight = sum(weights)
-    weight_factors = [w / total_weight for w in weights]
     aggregated_metrics = _aggregation(
         metric_records=metric_records,
-        weight_factors=weight_factors,
+        weight_factors=[w / total_weight for w in weights],
         weight_key=weight_key
     )
     return aggregated_metrics

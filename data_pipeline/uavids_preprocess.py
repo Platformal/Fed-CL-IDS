@@ -13,12 +13,14 @@ DISTRIBUTION_PATH = SPLITS_DIR_PATH / 'uavids_distribution.yaml'
 UAVIDS_DAYS_PATH = SPLITS_DIR_PATH / 'uavids_days.yaml'
 OUTPUT_DIR_PATH = DATA_PIPELINE_PATH / 'preprocessed_uavids'
 
+SPLITS_DIR_PATH.mkdir(parents=True, exist_ok=True)
 random.seed(RANDOM_SEED)
 
-def generate_uavids_days() -> None:
+def generate_days() -> None:
     """
     Assigns list of integers for each day in file. It is split by
     anchoring Normal Traffic and sampling other attacks from that
+    based off of the distribution file.
     """
     df = pd.read_csv(UAVIDS_CSV_PATH)
     # Group flow IDs by their labels
@@ -93,7 +95,7 @@ def generate_uavids_days() -> None:
     with UAVIDS_DAYS_PATH.open('w', encoding='utf-8') as file:
         yaml.dump(final_dict, file, default_flow_style=False)
 
-def preprocess_uavids():
+def preprocess():
     with UAVIDS_DAYS_PATH.open(encoding='utf-8') as file:
         uavids_days = cast(dict[int, list[int]], yaml.safe_load(file))
 
@@ -115,5 +117,5 @@ def preprocess_uavids():
         print(day_df['label'].value_counts() / len(day_df))
     print(day_df)
 if __name__ == "__main__":
-    generate_uavids_days()
-    preprocess_uavids()
+    generate_days()
+    preprocess()
