@@ -5,10 +5,10 @@ from pathlib import Path
 import hashlib
 import time
 
-import pandas as pd
-import numpy as np
 from torch import Tensor
 import torch
+import pandas as pd
+import numpy as np
 
 from flwr.app import ArrayRecord, ConfigRecord, Context, MetricRecord
 from flwr.serverapp import Grid, ServerApp
@@ -122,7 +122,8 @@ class Server:
         for key, (value, rounding, sentinel_value) in values.items():
             if isinstance(sentinel_value, bool) and not sentinel_value:
                 value = None
-            elif isinstance(sentinel_value, (int, float)) and value == sentinel_value:
+            elif (isinstance(sentinel_value, (int, float))
+                  and value == sentinel_value):
                 value = None
             else:
                 value = round(value, rounding)
@@ -145,50 +146,54 @@ class Server:
         init_df = pd.read_parquet(filepath)
 
         # 80/20 split
-        train_eval_split = train_test_split(
+        train_eval_split: tuple[list[int], list[int]] = tuple(train_test_split(
             range(len(init_df)),
             train_size=train_ratio,
             random_state=random_seed,
             stratify=init_df['label']
-        )
+        ))
         zipped_data = zip(
             train_eval_split,
             (self.n_train_clients, self.n_evaluate_clients),
             result
         )
+
         # Stratify train/evaluate into n_clients, then wrap ConfigRecord
         for indices, n_clients, data_list in zipped_data:
             if stratify_clients:
-                subset_df = init_df.iloc[indices]
-                client_flows = self._stratify_subset(subset_df, n_clients)
+                client_flows = self._stratify_subset(
+                    indices=indices,
+                    labels=init_df.iloc[indices]['label'],
+                    n_clients=n_clients,
+                    random_seed=random_seed
+                )
             else:
                 client_flows = self._hash_flows(indices, n_clients)
-            config_data = [
+            configurations = [
                 {'flows': flows, 'filepath': str(filepath)}
                 for flows in client_flows
             ]
-            data_list.extend(map(ConfigRecord, config_data))
+            data_list.extend(map(ConfigRecord, configurations))
         return result
 
     def _stratify_subset(
             self,
-            dataframe: pd.DataFrame,
+            indices: list[int],
+            labels: pd.Series,
             n_clients: int,
             random_seed: Optional[int] = None
     ) -> list[list[int]]:
-        """Further stratifies train/evaluate flows into n_clients"""
-        filler = np.zeros(len(dataframe))
+        """Further stratifies given indices into n_clients"""
         k_fold = StratifiedKFold(
             n_splits=n_clients,
             shuffle=True,
             random_state=random_seed
         )
+        np_indices = np.array(indices)
         client_flows: list[list[int]] = [
-            cast(np.ndarray, np_indices).tolist()
-            for _, np_indices in k_fold.split(filler, dataframe['label'])
+            np_indices[sub_indices].tolist()
+            for _, sub_indices in k_fold.split(np_indices, labels)
         ]
-        # for flows in client_flows:
-        #     print(dataframe.iloc[flows]['label'].value_counts())
         return client_flows
 
     def _hash_flows(self, flows: Iterable[int], n_clients: int) -> list[list[int]]:
@@ -215,7 +220,7 @@ def main(grid: Grid, context: Context) -> None:
     daily_metric_logs: list[list[MetricRecord]] = []
     previous_roc: Optional[float] = None
     mapped_filepath = {
-        day: CICIDS_DIR_PATH / f"{day}.parquet"
+        day: CICIDS_DIR_PATH / f'{day}.parquet'
         for day in range(1, server.n_days + 1)
     }
 

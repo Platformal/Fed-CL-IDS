@@ -15,12 +15,7 @@ class FedMetrics:
 
     @staticmethod
     def auroc(labels: Tensor, probabilities: Tensor) -> float:
-        # print(np.unique(labels, return_counts=True))
-        # print(probabilities.min(), probabilities.max())
-        # print()
-        result = roc_auc_score(labels, probabilities)
-        # print(type(result))
-        return float(result)
+        return float(roc_auc_score(labels, probabilities))
 
     @staticmethod
     def auprc(labels: Tensor, probabilities: Tensor) -> float:
@@ -29,7 +24,11 @@ class FedMetrics:
         return float(auc(recall, precision))
 
     @staticmethod
-    def recall_at_fpr(labels: Tensor, probabilities: Tensor, target_fpr: float) -> float:
+    def recall_at_fpr(
+        labels: Tensor,
+        probabilities: Tensor,
+        target_fpr: float
+    ) -> float:
         """May return NaN if number of unique labels is 1"""
         fpr, tpr, _ = roc_curve(labels, probabilities)
         interpolated_recall = np.interp(target_fpr, fpr, tpr)

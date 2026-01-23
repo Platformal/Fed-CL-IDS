@@ -44,9 +44,6 @@ class ElasticWeightConsolidation:
         for name, parameter in model.named_parameters():
             # GradSampleModule prepends _module. to each param name
             name = name.removeprefix('_module.')
-            if name not in self._prev_parameters:
-                print("Parameter not in prev_parameters")
-                continue
             f_i = self._fisher_diagonal[name]
             theta_star = self._prev_parameters[name]
             penalty_i = f_i * (parameter - theta_star).pow(2)

@@ -60,6 +60,10 @@ class Client:
         self.er_mix_ratio = cast(float, context.run_config['er-mix-ratio'])
         self.ewc_lambda = cast(float, context.run_config['ewc-lambda'])
 
+        # Stores path, indices, and result for a given day
+        self._dataframe: pd.DataFrame
+        self._dataframe_path = Path()
+
     def _initialize_model(self, context: Context) -> MLP:
         widths = cast(str, context.run_config['mlp-widths'])
         model = MLP(
@@ -85,7 +89,12 @@ class Client:
         Reads from given filepath and returns a tuple of containing the
         locally scaled features and the labels binarized, i.e. float(bool(label))
         """
-        df = pd.read_parquet(filepath).iloc[indices]
+        # Assuming no node resampling, the indices should be same.
+        # Therefore you can cache entire result
+        if not filepath.samefile(self._dataframe_path):
+            self._dataframe = pd.read_parquet(filepath)
+            self._dataframe_path = filepath
+        df = self._dataframe.iloc[indices]
         features, labels = df.drop('label', axis=1), df['label']
         np_features = Client.scaler.fit_transform(features.to_numpy('float32'))
         np_labels = labels.to_numpy(bool).astype('float32')
@@ -237,7 +246,7 @@ class Client:
         parameter_pairs = zip(model.parameters(), server_parameters)
         for client_parameter, server_parameter in parameter_pairs:
             difference = client_parameter - server_parameter
-            # sum of squared vectors produces the l2 norm
+            # sum of squared vectors forms the l2 norm
             proximal_term += torch.sum(difference ** 2)
         return self.mu * 0.5 * proximal_term
 

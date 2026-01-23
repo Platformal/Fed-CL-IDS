@@ -77,13 +77,13 @@ class FedCLIDSModel(FedAvg):
         )
         return messages
 
-    def sample_nodes(self, resample_nodes: bool = False) -> None:
+    def sample_nodes(self) -> None:
         """
         Modifies node IDs of train, evaluate, and all node IDs.
         If resampling enabled, it will randomly select train and evaluate
         nodes again if it isn't the first time sampling.
         """
-        if not resample_nodes and (self.train_nodes or self.evaluate_nodes):
+        if self.train_nodes or self.evaluate_nodes:
             return
         n_all_nodes = len(self.all_nodes)
         if self.fraction_evaluate:
@@ -163,11 +163,6 @@ class FedCLIDSModel(FedAvg):
             if not math.isnan(cast(float, metric_record['auroc'])):
                 valid_aurocs.append(record_dict)
 
-        # print([
-        #     next(iter(record.metric_records.values()))['auroc']
-        #     for record in reply_contents
-        # ])
-
         if valid_aurocs:
             non_nan_metrics = aggregate_metricrecords(
                 records=valid_aurocs,
@@ -195,7 +190,7 @@ class FedCLIDSModel(FedAvg):
         self.summary()
         log(INFO, '')
 
-        self.sample_nodes(cast(bool, self.context.run_config['resample-nodes']))
+        self.sample_nodes()
 
         train_config = train_config or [
             ConfigRecord()

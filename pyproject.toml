@@ -38,10 +38,9 @@ clientapp = "fed.client:app"
 [tool.flwr.app.config]
 fraction-train = 0.5
 fraction-evaluate = 1.0
-resample-nodes = false
-days = 1
+days = 4
 epochs = 2
-rounds = 80
+rounds = 60
 # How many recent metrics to aggregate after each day
 # Also used for how many to aggregate and compare for recovery time (FedAvg)
 n-aggregations = 10
@@ -58,7 +57,7 @@ cl-enabled = true
 ewc-lambda = 50
 er-memory = 0.005
 er-mix-ratio = 0.2
-n-features = 78
+n-features = 20
 
 dp-enabled = true
 clipping = 0.5
