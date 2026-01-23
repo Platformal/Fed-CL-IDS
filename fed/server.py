@@ -85,6 +85,10 @@ class Server:
         # Saves most recent aggregated data from the rounds not average per day
         torch.save(self.current_parameters, OUTPUT_PATH / f'day{day}.pt')
 
+        recent_metrics = all_rounds[-self.n_aggregate:]
+        worst_metric = min(recent_metrics, key=lambda x: x['auroc'])
+        fairness = cast(float, worst_metric['auroc']) / agg_metrics['auroc']
+
         day_epsilon = 0.0
         if self.dp_enabled:
             rounds = cast(list[dict[str, float]], all_rounds)
@@ -96,7 +100,7 @@ class Server:
             'daily_epsilon': (day_epsilon, 6, self.dp_enabled),
             'total_epsilon': (self.total_epsilon, 6, self.dp_enabled),
             'recovery-seconds': (recovery_metric['recovery-seconds'], 3, -1),
-            'recovery-round': (recovery_metric['recovery-round'], 0, -1)
+            'recovery-round': (recovery_metric['recovery-round'], 0, -1),
         }
         formatted_values = self._format_values(values)
         text = [
@@ -107,6 +111,7 @@ class Server:
             f"Total Epsilon: {formatted_values['total_epsilon']}",
             f"Recovery Time (sec): {formatted_values['recovery-seconds']}, "
             f"Recovery Rounds: {formatted_values['recovery-round']}",
+            f"Worst/Avg AUROC: {round(fairness, 6)}",
             f"{agg_metrics}\n"
         ]
         with METRICS_PATH.open('a', encoding='utf-8') as file:
