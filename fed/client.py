@@ -43,7 +43,6 @@ class Client:
         self.batch_size = cast(int, context.run_config['batch-size'])
         self.mu = cast(float, context.run_config['proximal-mu'])
         self.model: MLP = self._initialize_model(context)
-        self.n_rounds = cast(int, context.run_config['rounds'])
 
         self.dp = DifferentialPrivacy()
         self.dp_enabled = cast(bool, context.run_config['dp-enabled'])
@@ -62,9 +61,8 @@ class Client:
         self.er_mix_ratio = cast(float, context.run_config['er-mix-ratio'])
         self.ewc_lambda = cast(float, context.run_config['ewc-lambda'])
 
-        # Stores path, indices, and result for a given day
-        self._dataframe: pd.DataFrame
         self._dataframe_path = Path()
+        self._data_cache: dict[tuple[int, ...], tuple[Tensor, Tensor]] = {}
 
     def _initialize_model(self, context: Context) -> MLP:
         widths = cast(str, context.run_config['mlp-widths'])
@@ -78,11 +76,23 @@ class Client:
         )
         return model.to(self.device)
 
-    def update_model(self, parameters: dict[str, Tensor]) -> None:
-        """Load torch_state_dict into client model and self.server_model."""
-        self.model.load_state_dict(parameters)
-
     def data_from_indices(
+            self,
+            filepath: Path,
+            indices: list[int]
+    ) -> tuple[Tensor, Tensor]:
+        # Assuming no node resampling, the indices should be same for a day.
+        # Therefore you can cache entire result
+        if not filepath.samefile(self._dataframe_path):
+            self._dataframe_path = filepath
+            self._data_cache.clear()
+            self._sample_pool = list(range(len(indices)))
+            random.shuffle(self._sample_pool)
+        if (key := tuple(indices)) not in self._data_cache:
+            self._data_cache[key] = self._process_data(filepath, indices)
+        return self._data_cache[key]
+
+    def _process_data(
             self,
             filepath: Path,
             indices: list[int]
@@ -91,15 +101,7 @@ class Client:
         Reads from given filepath and returns a tuple of containing the
         locally scaled features and the labels binarized, i.e. float(bool(label))
         """
-        # Assuming no node resampling, the indices should be same.
-        # Therefore you can cache entire result
-        if not filepath.samefile(self._dataframe_path):
-            self._dataframe = pd.read_parquet(filepath)
-            self._dataframe_path = filepath
-            self._sample_pool = list(range(len(indices)))
-            random.shuffle(self._sample_pool)
-
-        df = self._dataframe.iloc[indices]
+        df = pd.read_parquet(filepath).iloc[indices]
         features, labels = df.drop('label', axis=1), df['label']
         np_features = Client.scaler.fit_transform(features.to_numpy('float32'))
         np_labels = labels.to_numpy(bool).astype('float32')
@@ -112,7 +114,7 @@ class Client:
             train_set: tuple[Tensor, Tensor],
             server_state_dict: OrderedDict[str, Tensor],
     ) -> tuple[float, int]:
-        self.update_model(server_state_dict)
+        self.model.load_state_dict(server_state_dict)
         server_parameters = [
             param.detach().clone()
             for param in self.model.parameters()
@@ -139,7 +141,7 @@ class Client:
             cosine_epochs=len(data_loader) * self.epochs
         )
 
-        total_loss = self._zero_tensor()
+        total_loss = self._zero_scalar()
         total_samples = 0
         for _ in range(self.epochs):
             loss, n_samples = self._train_iteration(
@@ -177,7 +179,7 @@ class Client:
             server_parameters: Iterable[Tensor]
     ) -> tuple[Tensor, int]:
         n_samples = 0
-        iteration_loss = self._zero_tensor()
+        iteration_loss = self._zero_scalar()
         for batch in data_loader:
             batch_features, batch_labels = cast(tuple[Tensor, Tensor], batch)
             # Poisson sampling could produce empty batch
@@ -211,7 +213,7 @@ class Client:
             server_parameters: Iterable[Tensor]
     ) -> Tensor:
         # (mu / 2) * sum(||local - global||^2)
-        proximal_term = self._zero_tensor()
+        proximal_term = self._zero_scalar()
         parameter_pairs = zip(model.parameters(), server_parameters)
         for client_parameter, server_parameter in parameter_pairs:
             difference = client_parameter - server_parameter
@@ -223,13 +225,13 @@ class Client:
     def evaluate(
         self,
         test_set: tuple[Tensor, Tensor],
-        server_parameters: OrderedDict[str, Tensor]
+        server_state_dict: OrderedDict[str, Tensor]
     ) -> tuple[dict[str, float], int]:
         """
         Loads server model and evaluates server aggregated model
         against the test set.
         """
-        self.update_model(server_parameters)
+        self.model.load_state_dict(server_state_dict)
         self.model.eval()
         data_loader = cast(
             DataLoader[tuple[Tensor, Tensor]],
@@ -243,8 +245,8 @@ class Client:
             'predictions': [],
             'probabilities': []
         }
-        n_correct = self._zero_tensor()
-        total_loss = self._zero_tensor()
+        n_correct = self._zero_scalar()
+        total_loss = self._zero_scalar()
         total_samples = 0
 
         for batch in data_loader:
@@ -321,8 +323,8 @@ class Client:
             dp_model.eval()
         return dp_model, dp_optimizer, dp_data_loader
 
-    def _zero_tensor(self) -> Tensor:
-        """Using tensor variables to reduce Tensor.item() sync overhead."""
+    def _zero_scalar(self) -> Tensor:
+        """Using tensors to reduce Tensor.item() sync overhead."""
         return torch.tensor(0.0, dtype=torch.float32, device=self.device)
 
 

@@ -75,8 +75,7 @@ class ElasticWeightConsolidation:
 
             model.zero_grad()
             outputs: Tensor = model(batch_features)
-            outputs = outputs.squeeze(1)
-            loss: Tensor = criterion(outputs, batch_labels)
+            loss: Tensor = criterion(outputs.squeeze(1), batch_labels)
             loss.backward()
 
             with torch.no_grad():
@@ -160,9 +159,9 @@ class ExperienceReplay:
             n_samples = int(sampling_mask.sum().item())
 
         selected = [sample_pool.pop() for _ in range(n_samples) if sample_pool]
-        selected_features = features[selected].cpu().detach()
-        selected_labels = labels[selected].cpu().detach()
-        self._buffer.append(selected_features, selected_labels)
+        sampled_features = features[selected].cpu().detach()
+        sampled_labels = labels[selected].cpu().detach()
+        self._buffer.append(sampled_features, sampled_labels)
 
 @dataclass
 class MemoryMappedData:

@@ -246,7 +246,7 @@ class FedCLIDSModel(FedAvg):
             # Send messages and wait for replies
             evaluate_messages = self.configure_evaluate(
                 arrays=current_array,
-                configs=evaluate_config,
+                configs=evaluate_config
             )
             evaluate_replies: Iterable[Message] = self.grid.send_and_receive(
                 messages=evaluate_messages,
