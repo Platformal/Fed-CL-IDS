@@ -39,7 +39,7 @@ class FedCLIDSModel(FedAvg):
     def configure_train(
             self,
             arrays: ArrayRecord,
-            configs: Iterable[ConfigRecord],
+            configs: Iterable[ConfigRecord]
     ) -> list[Message]:
         """Configure the next round of federated training"""
         if self.fraction_train == 0.0:
@@ -54,13 +54,12 @@ class FedCLIDSModel(FedAvg):
             message_type=MessageType.TRAIN,
             configs=configs
         )
-        messages[0].content[self.configrecord_key]['profile_on'] = 1
         return messages
 
     def configure_evaluate(
             self,
             arrays: ArrayRecord,
-            configs: list[ConfigRecord],
+            configs: list[ConfigRecord]
     ) -> list[Message]:
         """Configure the next round of federated evaluation"""
         if self.fraction_evaluate == 0.0:
@@ -247,7 +246,7 @@ class FedCLIDSModel(FedAvg):
             # Send messages and wait for replies
             evaluate_messages = self.configure_evaluate(
                 arrays=current_array,
-                configs=evaluate_config
+                configs=evaluate_config,
             )
             evaluate_replies: Iterable[Message] = self.grid.send_and_receive(
                 messages=evaluate_messages,

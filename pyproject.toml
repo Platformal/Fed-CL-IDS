@@ -71,8 +71,8 @@ default = "local-simulation"
 # Local simulation federation with 10 virtual SuperNodes; number of clients.
 # Example: flwr run --federation-config options.num-supernodes=20
 [tool.flwr.federations.local-simulation]
-options.num-supernodes = 10
-options.backend.client-resources.num-cpus = 2 # default: 2
+options.num-supernodes = 20
+options.backend.client-resources.num-cpus = 3 # default: 2
 # If float, uses % of GPU VRAM.
 # If int, how many gpus to allocate per client.
 options.backend.client-resources.num-gpus = 0.2

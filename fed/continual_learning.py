@@ -144,7 +144,8 @@ class ExperienceReplay:
     def add_data(
             self,
             original_dataset: tuple[Tensor, Tensor],
-            sample_rate: float
+            sample_rate: float,
+            sample_pool: list[int]
     ) -> None:
         """
         Add to replay buffer. Detaches and moves tensor to the CPU.
@@ -154,12 +155,11 @@ class ExperienceReplay:
         features, labels = original_dataset
         n_new_samples = len(labels)
         # Prefer to get exact amount if n_samples * sample rate is big enough
-        if n_samples := int(n_new_samples * sample_rate):
-            size = (n_samples,)
-            selected = torch.randint(0, n_new_samples, size)
-        else:
-            size = (n_new_samples,)
-            selected = torch.rand(size) <= sample_rate
+        if not (n_samples := int(n_new_samples * sample_rate)):
+            sampling_mask = torch.rand(size=(n_new_samples,)) < sample_rate
+            n_samples = int(sampling_mask.sum().item())
+
+        selected = [sample_pool.pop() for _ in range(n_samples) if sample_pool]
         selected_features = features[selected].cpu().detach()
         selected_labels = labels[selected].cpu().detach()
         self._buffer.append(selected_features, selected_labels)

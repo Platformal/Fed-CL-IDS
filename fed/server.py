@@ -101,17 +101,18 @@ class Server:
             'total_epsilon': (self.total_epsilon, 6, self.dp_enabled),
             'recovery-seconds': (recovery_metric['recovery-seconds'], 3, -1),
             'recovery-round': (recovery_metric['recovery-round'], 0, -1),
+            'fairness': (fairness, 6, None)
         }
-        formatted_values = self._format_values(values)
+        formatted = self._format_values(values)
         text = [
             f"Day {day}",
             f"{self.n_train_clients}/{self.total_clients} train",
             f"Rounds: {self.n_rounds}",
-            f"Day Epsilon: {formatted_values['daily_epsilon']}, "
-            f"Total Epsilon: {formatted_values['total_epsilon']}",
-            f"Recovery Time (sec): {formatted_values['recovery-seconds']}, "
-            f"Recovery Rounds: {formatted_values['recovery-round']}",
-            f"Worst/Avg AUROC: {round(fairness, 6)}",
+            f"Day Epsilon: {formatted['daily_epsilon']}, "
+            f"Total Epsilon: {formatted['total_epsilon']}",
+            f"Recovery Time (sec): {formatted['recovery-seconds']}, "
+            f"Recovery Rounds: {formatted['recovery-round']}",
+            f"Worst/Avg AUROC: {formatted['fairness']}",
             f"{agg_metrics}\n"
         ]
         with METRICS_PATH.open('a', encoding='utf-8') as file:
@@ -121,18 +122,18 @@ class Server:
 
     def _format_values(
             self,
-            values: dict[str, tuple[float, int, bool | int | float]]
+            values: dict[str, tuple[float, int, bool | Optional[int | float]]]
     ) -> dict[str, Optional[float]]:
         new_dict: dict[str, Optional[float]] = {}
-        for key, (value, rounding, sentinel_value) in values.items():
-            if isinstance(sentinel_value, bool) and not sentinel_value:
-                value = None
-            elif (isinstance(sentinel_value, (int, float))
-                  and value == sentinel_value):
-                value = None
+        for key, (value, rounding, sentinel) in values.items():
+            if sentinel is None:
+                new_dict[key] = round(value, rounding)
+            elif isinstance(sentinel, bool) and sentinel:
+                new_dict[key] = round(value, rounding)
+            elif isinstance(sentinel, (int, float)) and value != sentinel:
+                new_dict[key] = round(value, rounding)
             else:
-                value = round(value, rounding)
-            new_dict[key] = value
+                new_dict[key] = None
         return new_dict
 
     def get_data(
@@ -166,7 +167,7 @@ class Server:
         # Stratify train/evaluate into n_clients, then wrap ConfigRecord
         for indices, n_clients, data_list in zipped_data:
             if stratify_clients:
-                client_flows = self._stratify_subset(
+                client_flows = self._partition_subset(
                     indices=indices,
                     labels=init_df.iloc[indices]['label'],
                     n_clients=n_clients,
@@ -181,7 +182,7 @@ class Server:
             data_list.extend(map(ConfigRecord, configurations))
         return result
 
-    def _stratify_subset(
+    def _partition_subset(
             self,
             indices: list[int],
             labels: pd.Series,

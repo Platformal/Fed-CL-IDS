@@ -7,6 +7,7 @@ from typing import Callable, Iterable, cast
 from collections import OrderedDict
 from pathlib import Path
 from time import time
+import random
 import os
 
 from flwr.app import ArrayRecord, Context, Message, MetricRecord, RecordDict
@@ -16,7 +17,6 @@ from flwr.clientapp import ClientApp
 from opacus.grad_sample.grad_sample_module import GradSampleModule
 from opacus.optimizers.optimizer import DPOptimizer
 from sklearn.preprocessing import RobustScaler
-from torch.profiler import profile, record_function, ProfilerActivity
 from torch.utils.data import DataLoader, TensorDataset
 from torch import Tensor
 import torch
@@ -43,6 +43,7 @@ class Client:
         self.batch_size = cast(int, context.run_config['batch-size'])
         self.mu = cast(float, context.run_config['proximal-mu'])
         self.model: MLP = self._initialize_model(context)
+        self.n_rounds = cast(int, context.run_config['rounds'])
 
         self.dp = DifferentialPrivacy()
         self.dp_enabled = cast(bool, context.run_config['dp-enabled'])
@@ -55,6 +56,7 @@ class Client:
             er_runtime_directory=RUNTIME_PATH,
             device=self.device
         )
+        self._sample_pool: list[int] = []
         self.cl_enabled = cast(bool, context.run_config['cl-enabled'])
         self.er_sample_rate = cast(float, context.run_config['er-memory'])
         self.er_mix_ratio = cast(float, context.run_config['er-mix-ratio'])
@@ -94,11 +96,13 @@ class Client:
         if not filepath.samefile(self._dataframe_path):
             self._dataframe = pd.read_parquet(filepath)
             self._dataframe_path = filepath
+            self._sample_pool = list(range(len(indices)))
+            random.shuffle(self._sample_pool)
+
         df = self._dataframe.iloc[indices]
         features, labels = df.drop('label', axis=1), df['label']
         np_features = Client.scaler.fit_transform(features.to_numpy('float32'))
         np_labels = labels.to_numpy(bool).astype('float32')
-
         tensor_features = torch.from_numpy(np_features)
         tensor_labels = torch.from_numpy(np_labels)
         return tensor_features.to(self.device), tensor_labels.to(self.device)
@@ -107,31 +111,7 @@ class Client:
             self,
             train_set: tuple[Tensor, Tensor],
             server_state_dict: OrderedDict[str, Tensor],
-            profile_on: bool
     ) -> tuple[float, int]:
-        """
-        Trains local model modified by the toml configuration file 
-        (such as continual learning and differential privacy), 
-        updates model, and calculates the average loss.
-        """
-        profile_on = False
-        if profile_on:
-            activities = [ProfilerActivity.CPU, ProfilerActivity.CUDA]
-            with profile(activities=activities, profile_memory=True) as prof:
-                result = self._train(train_set, server_state_dict)
-            TRACE_PATH.write_text(
-                prof.key_averages().table(sort_by='cpu_time_total')
-            )
-        else:
-            result = self._train(train_set, server_state_dict)
-        return result
-
-    def _train(
-            self,
-            train_set: tuple[Tensor, Tensor],
-            server_state_dict: OrderedDict[str, Tensor]
-    ) -> tuple[float, int]:
-        loop_start = time()
         self.update_model(server_state_dict)
         server_parameters = [
             param.detach().clone()
@@ -177,7 +157,7 @@ class Client:
             self.model = cast(MLP, training_model.to_standard_module())
 
         if self.cl_enabled:
-            self.cl.er.add_data(train_set, self.er_sample_rate)
+            self.cl.er.add_data(train_set, self.er_sample_rate, self._sample_pool)
             self.cl.ewc.update_fisher_information(
                 model=self.model,
                 train_set=train_set,
@@ -186,7 +166,6 @@ class Client:
             )
             self.cl.ewc.update_prev_parameters(self.model)
         average_loss = total_loss / max(1, total_samples)
-        print(f"Training Time: {time() - loop_start:.3f} sec")
         return average_loss.item(), total_samples // self.epochs
 
     def _train_iteration(
@@ -206,25 +185,15 @@ class Client:
                 continue
 
             outputs: Tensor = model(batch_features) # Forward pass
-            outputs = outputs.squeeze(1)
-            loss: Tensor = Client.criterion(outputs, batch_labels)
+            loss: Tensor = Client.criterion(outputs.squeeze(1), batch_labels)
 
             # As the model changes from its gradients,
             # calculate penalties if new params stray too far
             if self.cl_enabled and not self.cl.ewc.is_empty():
-                batch_fisher_penalty = self.cl.ewc.calculate_penalty(
-                    model=model,
-                    ewc_lambda=self.ewc_lambda
-                )
-                loss += batch_fisher_penalty
-
+                loss += self.cl.ewc.calculate_penalty(model, self.ewc_lambda)
             # If FedAvg, ignore, else perform FedProx calculation
             if self.mu:
-                proximal_term = self._calculate_proximal_term(
-                    model=model,
-                    server_parameters=server_parameters
-                )
-                loss += proximal_term
+                loss += self._calculate_proximal_term(model, server_parameters)
 
             optimizer.zero_grad() # Prevents gradient accumulation
             loss.backward() # Calculate where to step using mini-batch SGD
@@ -373,17 +342,18 @@ def client_train(client: Client, msg: Message) -> Message:
     Initializes dataframe for client, trains, and constructs message to send
     back to server.
     """
-    profile_on = 'profile_on' in msg.content['config']
     server_arrays = cast(ArrayRecord, msg.content['arrays'])
     server_parameters = server_arrays.to_torch_state_dict()
     filepath = Path(cast(str, msg.content['config']['filepath']))
     row_indices = cast(list[int], msg.content['config']['flows'])
     train_set = client.data_from_indices(filepath, row_indices)
-    average_loss, n_samples = client.train(train_set, server_parameters, profile_on)
+    time_start = time()
+    average_loss, n_samples = client.train(train_set, server_parameters)
     metrics = {
-        'train_loss': average_loss,
+        'training-loss': average_loss,
         'epsilon': client.dp.get_epsilon(client.delta),
-        'num-examples': n_samples
+        'num-examples': n_samples,
+        'training-time': time() - time_start
     }
     # state_dict() detaches from grad, but still on cuda
     client_parameters = cast(OrderedDict, client.model.state_dict())

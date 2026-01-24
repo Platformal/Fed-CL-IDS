@@ -19,8 +19,8 @@ class MLP(nn.Module):
         ) -> None:
         super().__init__()
         self.n_features = n_features
-        self.hidden_widths = hidden_widths
         self.dropout = dropout
+        self.hidden_widths = tuple(hidden_widths)
         self.weight_decay = weight_decay
         self.lr_max = lr_max
         self.lr_min = lr_min
