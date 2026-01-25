@@ -407,3 +407,9 @@ Day 2 | 5/10 train | Rounds: 80 | Day Epsilon: 104.834129, Total Epsilon: 253.38
 Day 3 | 5/10 train | Rounds: 80 | Day Epsilon: 91.353094, Total Epsilon: 344.740342 | Recovery Time (sec): 21.949, Recovery Rounds: 10 | {'accuracy': 0.96161, 'loss': 0.243772, 'auroc': 0.989753, 'auprc': 0.980984, 'macro-f1': 0.9615, 'recall@fpr=1%': 0.710031, 'epsilon': 1.141929}
 Day 4 | 5/10 train | Rounds: 80 | Day Epsilon: 94.200916, Total Epsilon: 438.941258 | Recovery Time (sec): 21.054, Recovery Rounds: 10 | {'accuracy': 0.943028, 'loss': 0.363095, 'auroc': 0.982452, 'auprc': 0.986601, 'macro-f1': 0.929099, 'recall@fpr=1%': 0.753336, 'epsilon': 1.033939}
 
+Worst-Avg AUROC:
+Day 1 | 10/20 train | Rounds: 60 | Day Epsilon: 162.819575, Total Epsilon: 162.819575 | Recovery Time (sec): None, Recovery Rounds: None | Worst/Avg AUROC: 0.999428 | {'accuracy': 0.976655, 'loss': 0.115308, 'auroc': 0.992184, 'auprc': 0.95281, 'macro-f1': 0.927751, 'recall@fpr=1%': 0.894236, 'epsilon': 1.690708}
+Day 2 | 10/20 train | Rounds: 60 | Day Epsilon: 113.710977, Total Epsilon: 276.530552 | Recovery Time (sec): 28.635, Recovery Rounds: 10 | Worst/Avg AUROC: 0.999844 | {'accuracy': 0.963028, 'loss': 0.239031, 'auroc': 0.989516, 'auprc': 0.981618, 'macro-f1': 0.955948, 'recall@fpr=1%': 0.809465, 'epsilon': 1.895183}
+Day 3 | 10/20 train | Rounds: 60 | Day Epsilon: 106.308239, Total Epsilon: 382.838792 | Recovery Time (sec): 28.644, Recovery Rounds: 10 | Worst/Avg AUROC: 0.999485 | {'accuracy': 0.967738, 'loss': 0.202177, 'auroc': 0.990665, 'auprc': 0.979542, 'macro-f1': 0.967707, 'recall@fpr=1%': 0.69207, 'epsilon': 1.771804}
+Day 4 | 10/20 train | Rounds: 60 | Day Epsilon: 90.435389, Total Epsilon: 473.274181 | Recovery Time (sec): 27.211, Recovery Rounds: 10 | Worst/Avg AUROC: 0.998635 | {'accuracy': 0.946557, 'loss': 0.36716, 'auroc': 0.980388, 'auprc': 0.982913, 'macro-f1': 0.940887, 'recall@fpr=1%': 0.690909, 'epsilon': 1.475736}
+

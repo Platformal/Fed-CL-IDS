@@ -28,7 +28,7 @@ METRICS_PATH = OUTPUT_PATH / 'metrics.txt'
 class Server:
     """Main class holding configurations, main model parameters, 
     and federated aggregation method."""
-    def __init__(self, grid: Grid, context: Context) -> None:
+    def __init__(self, grid: Grid, context: Context, n_features: int) -> None:
         self.fraction_train = cast(float, context.run_config['fraction-train'])
         self.fraction_evaluate = cast(float, context.run_config['fraction-evaluate'])
         self.total_clients = len(list(grid.get_node_ids()))
@@ -47,15 +47,19 @@ class Server:
             fraction_train=self.fraction_train,
             fraction_eval=self.fraction_evaluate
         )
-        self.current_parameters = self._initial_parameters(context)
+        self.current_parameters = self._initial_parameters(context, n_features)
         self.total_epsilon = 0.0
         self.dataframe: pd.DataFrame
         self.dataframe_path: Optional[Path] = None
 
-    def _initial_parameters(self, context: Context) -> OrderedDict[str, Tensor]:
+    def _initial_parameters(
+            self,
+            context: Context,
+            n_features: int
+    ) -> OrderedDict[str, Tensor]:
         widths = cast(str, context.run_config['mlp-widths'])
         model = MLP(
-            n_features=cast(int, context.run_config['n-features']),
+            n_features=n_features,
             hidden_widths=map(int, widths.split(',')),
             dropout=cast(float, context.run_config['mlp-dropout']),
             weight_decay=cast(float, context.run_config['mlp-weight-decay']),
@@ -85,7 +89,7 @@ class Server:
         # Saves most recent aggregated data from the rounds not average per day
         torch.save(self.current_parameters, OUTPUT_PATH / f'day{day}.pt')
 
-        recent_metrics = all_rounds[-self.n_aggregate:]
+        recent_metrics = all_rounds[-min(self.n_aggregate, len(all_rounds)):]
         worst_metric = min(recent_metrics, key=lambda x: x['auroc'])
         fairness = cast(float, worst_metric['auroc']) / agg_metrics['auroc']
 
@@ -139,6 +143,7 @@ class Server:
     def get_data(
             self,
             filepath: Path,
+            n_features: int,
             random_seed: Optional[int] = None,
             train_ratio: float = 0.8,
             stratify_clients: bool = True
@@ -176,7 +181,9 @@ class Server:
             else:
                 client_flows = self._hash_flows(indices, n_clients)
             configurations = [
-                {'flows': flows, 'filepath': str(filepath)}
+                {'flows': flows,
+                 'filepath': str(filepath),
+                 'n-features': n_features}
                 for flows in client_flows
             ]
             data_list.extend(map(ConfigRecord, configurations))
@@ -217,7 +224,6 @@ app = ServerApp()
 @app.main()
 def main(grid: Grid, context: Context) -> None:
     """Triggered when flwr run is called."""
-    server = Server(grid, context)
     if RUNTIME_PATH.exists():
         clear_directory(RUNTIME_PATH)
     else:
@@ -227,12 +233,15 @@ def main(grid: Grid, context: Context) -> None:
     previous_roc: Optional[float] = None
     mapped_filepath = {
         day: CICIDS_DIR_PATH / f'{day}.parquet'
-        for day in range(1, server.n_days + 1)
+        for day in range(1, cast(int, context.run_config['days']) + 1)
     }
+
+    n_features = len(pd.read_parquet(mapped_filepath[1]).columns) - 1
+    server = Server(grid, context, n_features)
 
     start = time.time()
     for day, filepath in mapped_filepath.items():
-        train_flows, evaluate_flows = server.get_data(filepath)
+        train_flows, evaluate_flows = server.get_data(filepath, n_features)
         daily_result = server.federated_model.start(
             initial_arrays=ArrayRecord(server.current_parameters),
             current_day=day,
@@ -258,5 +267,5 @@ def main(grid: Grid, context: Context) -> None:
 
 def clear_directory(filepath: Path) -> None:
     """Removes all files in a folder directory"""
-    for file in filter(Path.is_file, filepath.iterdir()):
+    for file in filepath.glob('*.bin'):
         file.unlink()

@@ -28,7 +28,6 @@ from models.mlp import MLP, Adam, CosineAnnealingLR
 from models.fed_metrics import FedMetrics
 
 RUNTIME_PATH = Path('runtime')
-TRACE_PATH = RUNTIME_PATH / 'trace.txt'
 
 class Client:
     """Acts as an interactive instance of a client."""
@@ -36,13 +35,13 @@ class Client:
     scaler = RobustScaler()
     criterion = torch.nn.BCEWithLogitsLoss() # Returns tensor on device
 
-    def __init__(self, context: Context) -> None:
+    def __init__(self, msg: Message, context: Context) -> None:
         device_str = 'cuda' if torch.cuda.is_available() else 'cpu'
         self.device = torch.device(device_str)
         self.epochs = cast(int, context.run_config['epochs'])
         self.batch_size = cast(int, context.run_config['batch-size'])
         self.mu = cast(float, context.run_config['proximal-mu'])
-        self.model: MLP = self._initialize_model(context)
+        self.model: MLP = self._initialize_model(msg, context)
 
         self.dp = DifferentialPrivacy()
         self.dp_enabled = cast(bool, context.run_config['dp-enabled'])
@@ -64,10 +63,10 @@ class Client:
         self._dataframe_path = Path()
         self._data_cache: dict[tuple[int, ...], tuple[Tensor, Tensor]] = {}
 
-    def _initialize_model(self, context: Context) -> MLP:
+    def _initialize_model(self, msg: Message, context: Context) -> MLP:
         widths = cast(str, context.run_config['mlp-widths'])
         model = MLP(
-            n_features=cast(int, context.run_config['n-features']),
+            n_features=cast(int, msg.content['config']['n-features']),
             hidden_widths=map(int, widths.split(',')),
             dropout=cast(float, context.run_config['mlp-dropout']),
             weight_decay=cast(float, context.run_config['mlp-weight-decay']),
@@ -331,7 +330,7 @@ class Client:
 def _assign_client(function: Callable) -> Callable:
     """Initialize and cache client to context to maintain persistence."""
     def wrapper(msg: Message, context: Context) -> Message:
-        context.client = getattr(context, 'client', Client(context))
+        context.client = getattr(context, 'client', Client(msg, context))
         return function(context.client, msg)
     return wrapper
 
