@@ -14,10 +14,13 @@ description = ''
 license = "Apache-2.0"
 # Dependencies for your Flower App
 dependencies = [
-    "flwr[simulation]>=1.22.0",
-    "flwr-datasets[vision]>=0.5.0", # Not needed maybe
-    "torch==2.7.1",
-    "torchvision==0.22.1",
+    "flwr[simulation]>=1.25.0",
+    "matplotlib>=3.10.8",
+    "opacus>=1.5.4",
+    "pandas>=3.0.0",
+    "pyarrow>=23.0.0",
+    "scikit-learn>=1.8.0",
+    "torch>=2.10.0",
 ]
 
 [tool.hatch.build.targets.wheel]
@@ -71,10 +74,10 @@ default = "local-simulation"
 # Example: flwr run --federation-config options.num-supernodes=20
 [tool.flwr.federations.local-simulation]
 options.num-supernodes = 20
-options.backend.client-resources.num-cpus = 3 # default: 2
+# options.backend.client-resources.num-cpus = 3 # default: 2
 # If float, uses % of GPU VRAM.
 # If int, how many gpus to allocate per client.
-options.backend.client-resources.num-gpus = 0.2
+# options.backend.client-resources.num-gpus = 0.2
 
 # Remote federation example for use with SuperLink
 [tool.flwr.federations.remote-federation]
