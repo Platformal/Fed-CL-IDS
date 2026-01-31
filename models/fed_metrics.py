@@ -8,10 +8,11 @@ import numpy as np
 
 from flwr.app import MetricRecord
 
+
 class FedMetrics:
     @staticmethod
     def macro_f1(labels: Tensor, predictions: Tensor) -> float:
-        return float(f1_score(labels, predictions, average='macro'))
+        return float(f1_score(labels, predictions, average="macro"))
 
     @staticmethod
     def auroc(labels: Tensor, probabilities: Tensor) -> float:
@@ -25,9 +26,7 @@ class FedMetrics:
 
     @staticmethod
     def recall_at_fpr(
-        labels: Tensor,
-        probabilities: Tensor,
-        target_fpr: float
+        labels: Tensor, probabilities: Tensor, target_fpr: float
     ) -> float:
         """May return NaN if number of unique labels is 1"""
         fpr, tpr, _ = roc_curve(labels, probabilities)
@@ -35,22 +34,24 @@ class FedMetrics:
         return float(interpolated_recall)
 
     @staticmethod
+    def get_rank(data_list: list[int | float], percentile: int) -> float:
+        return np.percentile(data_list, percentile)
+
+    @staticmethod
     def create_metric_plots(
-        daily_metrics: list[list[MetricRecord]],
-        save_directory: Path
+        daily_metrics: list[list[MetricRecord]], save_directory: Path
     ) -> None:
         # List for each day
         # For each day there are x rounds that contain a dict[str, float]
         n_rounds = len(daily_metrics[0])
         x = list(range(1, n_rounds + 1))
         for day, rounds in enumerate(daily_metrics, 1):
-            auroc = [metrics['auroc'] for metrics in rounds]
-            plt.plot(x, auroc, label=f'Day {day}')
+            auroc = [metrics["auroc"] for metrics in rounds]
+            plt.plot(x, auroc, label=f"Day {day}")
         plt.title(
-            "Area Under Receiver Operating Characteristic Curve\n"
-            "by Days per Round"
+            "Area Under Receiver Operating Characteristic Curve\nby Days per Round"
         )
-        plt.xlabel('Rounds')
-        plt.ylabel('AUROC Curve')
-        plt.legend(loc='lower right')
-        plt.savefig(save_directory / 'daily_auroc.png', dpi=200)
+        plt.xlabel("Rounds")
+        plt.ylabel("AUROC Curve")
+        plt.legend(loc="lower right")
+        plt.savefig(save_directory / "daily_auroc.png", dpi=200)
